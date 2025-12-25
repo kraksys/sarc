@@ -7,11 +7,17 @@
 #include "sarc/security/crypto.hpp"
 
 namespace sarc::security {
+    using u32 = sarc::core::u32;
+
+    struct WrappedKey {
+        Key256 ct{};
+        Tag16 tag{};
+    };
 
     struct ZoneRootKey {
         sarc::core::ZoneId zone{ sarc::core::ZoneId::invalid() };
         Key256 key{};
-        sarc::core::Timetamp created_at{0};
+        sarc::core::Timestamp created_at{0};
         sarc::core::Timestamp rotated_at{0};
         u32 version{1};
     };
@@ -19,7 +25,7 @@ namespace sarc::security {
     struct ZoneGrant {
         sarc::core::ZoneId zone{ sarc::core::ZoneId::invalid() };
         sarc::core::UserId grantee{ sarc::core::UserId::invalid() };
-        Key256 wrapped_key{};
+        WrappedKey wrapped_key{};
         sarc::core::Timestamp created_at{0};
         sarc::core::Timestamp revoked_at{0};
         u32 version{1};
@@ -38,16 +44,19 @@ namespace sarc::security {
     sarc::core::Status wrap_zone_root_key(const NodeMasterKey& nmk,
         const KeyWrapNonce& nonce,
         const ZoneRootKey& zrk,
-        Key256* wrapped_out) noexcept;
+        WrappedKey* wrapped_out) noexcept;
 
     sarc::core::Status unwrap_zone_root_key(const NodeMasterKey& nmk,
         const KeyWrapNonce& nonce,
-        const Key256& wrapped,
+        sarc::core::ZoneId zone,
+        u32 version,
+        const WrappedKey& wrapped,
         ZoneRootKey* zrk_out) noexcept;
 
     static_assert(std::is_trivially_copyable_v<ZoneRootKey>);
     static_assert(std::is_trivially_copyable_v<ZoneGrant>);
     static_assert(std::is_trivially_copyable_v<NodeMasterKey>);
     static_assert(std::is_trivially_copyable_v<KeyWrapNonce>);
+    static_assert(std::is_trivially_copyable_v<WrappedKey>);
 
 } // namespace sarc::security

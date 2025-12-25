@@ -8,8 +8,9 @@
 
 namespace sarc::security {
     using u8 = sarc::core::u8;
-    using u16 = std::uint16_t;
-    using u32 = std::uint32_t;
+    using u16 = sarc::core::u16;
+    using u32 = sarc::core::u32;
+    using u64 = sarc::core::u64;
 
     struct Key256{
         u8 b[32]{};
@@ -24,7 +25,7 @@ namespace sarc::security {
     };
 
     enum class AeadId : u8 {
-        Aes256GcmSiv= 1,
+        ChaCha20Poly1305 = 1,
     };
 
     struct BufferView {
@@ -45,7 +46,7 @@ namespace sarc::security {
 
     struct SealedHeader{
         u8 version{1};
-        AeadId aead{AeadId::Aes256GcmSiv};
+        AeadId aead{AeadId::ChaCha20Poly1305};
         u16 reserved{0};
         u32 aad_len{0};
         u32 ct_len{0};
@@ -53,7 +54,7 @@ namespace sarc::security {
         Tag16 tag{};
     };
 
-    // Nonce rules; Caller supplies unique nonce per item (key || zone || object)
+    // Nonce rules; Caller supplies unique nonce per (key, zone, object).
     sarc::core::Status aead_seal(AeadId aead,
         const Key256& key,
         const Nonce12& nonce,
