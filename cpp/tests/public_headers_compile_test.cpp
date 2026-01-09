@@ -20,9 +20,10 @@
 #include "sarc/security/kdf.hpp"
 #include "sarc/security/keystore.hpp"
 #include "sarc/security/policy.hpp"
+#include "sarc/storage/buffer.hpp"
 #include "sarc/storage/hashing.hpp"
 #include "sarc/storage/layout.hpp"
-#include "sarc/storage/storage.hpp"
+#include "sarc/storage/object_store.hpp"
 
 TEST(PublicHeaders, Compile) {
     SUCCEED();

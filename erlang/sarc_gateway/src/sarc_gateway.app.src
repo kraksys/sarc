@@ -1,0 +1,22 @@
+{application, sarc_gateway,
+ [{description, "SARC Gateway - HTTP/REST API for SARC object store"},
+  {vsn, "0.1.0"},
+  {registered, [sarc_gateway_sup]},
+  {mod, {sarc_gateway_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    cowboy,
+    jsx
+   ]},
+  {env, [
+      {http_port, 8080},
+      {data_root, "/tmp/sarc_data"},
+      {db_path, "/tmp/sarc.db"},
+      {max_upload_size, 104857600}  % 100MB
+  ]},
+  {modules, []},
+
+  {licenses, ["Apache-2.0"]},
+  {links, []}
+ ]}.

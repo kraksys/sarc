@@ -19,6 +19,8 @@ namespace sarc::core{
 
     struct Hash256 {
         std::array<u8, 32> b{};
+        friend constexpr bool operator==(Hash256, Hash256) noexcept = default;
+        friend constexpr auto operator<=>(Hash256, Hash256) noexcept = default;
     };
     static_assert(sizeof(Hash256) == 32);
 
@@ -109,22 +111,29 @@ namespace sarc::core{
     };
 
     struct Trace {
-        FieldType type{FieldType::Text};
-        FieldData data{};
-        float confidence{1.0f};
-        SourceId source{SourceId::invalid()};
-        Timestamp updated_at{0};
+        FieldData data{};                     // 8 bytes - HOT (first cache line)
+        FieldType type{FieldType::Text};      // 1 byte - HOT
+        u8 _pad[3];                           // 3 bytes - explicit padding
+        float confidence{1.0f};               // 4 bytes - HOT
+        // --- 16 byte boundary (hot data fits in single cache line) ---
+        SourceId source{SourceId::invalid()}; // 4 bytes - COLD
+        u8 _pad2[4];                          // 4 bytes - padding for alignment
+        Timestamp updated_at{0};              // 8 bytes - COLD
     };
 
     struct Gestalt {
-        StringId type{StringId::invalid()};
-        StringId value{StringId::invalid()};
-        float weight{1.0f};
-        float confidence{1.0f};
-        SourceId source{SourceId::invalid()};
-        Timestamp created_at{0};
+        StringId type{StringId::invalid()};       // 4 bytes - HOT
+        StringId value{StringId::invalid()};      // 4 bytes - HOT
+        float weight{1.0f};                       // 4 bytes - HOT
+        float confidence{1.0f};                   // 4 bytes - HOT
+        // --- 16 byte boundary (all hot data) ---
+        SourceId source{SourceId::invalid()};     // 4 bytes - COLD
+        u8 _pad[4];                               // 4 bytes - padding for alignment
+        Timestamp created_at{0};                  // 8 bytes - COLD
     };
 
+    static_assert(sizeof(Trace) == 32);
+    static_assert(sizeof(Gestalt) == 32);
     static_assert(std::is_trivially_copyable_v<Trace>);
     static_assert(std::is_trivially_copyable_v<Gestalt>);
     static_assert(std::is_standard_layout_v<Trace>);

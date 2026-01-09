@@ -16,6 +16,9 @@ namespace sarc::cli {
         List = 4,
         CreateZone = 5,
         ShareZone = 6,
+        Gc = 7,
+        Verify = 8,
+        Exit = 9,
     };
 
     struct CommandSpec {
