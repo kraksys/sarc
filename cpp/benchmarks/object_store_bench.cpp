@@ -94,6 +94,48 @@ BENCHMARK(BM_ObjectPut)
     ->Arg(1024 * 1024)    // 1MB
     ->Arg(15 * 1024 * 1024);  // 15MB
 
+static void BM_ObjectPutStream(benchmark::State& state) {
+    InitializeObjectStore();
+
+    const u64 size = static_cast<u64>(state.range(0));
+    std::vector<u8> data(size);
+    for (size_t i = 0; i < size; ++i) {
+        data[i] = static_cast<u8>((i * 7) & 0xFF);
+    }
+
+    u32 counter = 0;
+    const u64 chunk_size = 64 * 1024; // 64KB chunks
+
+    for (auto _ : state) {
+        data[0] = static_cast<u8>(counter++ & 0xFF);
+
+        ObjectWriter writer;
+        writer.open();
+
+        for (u64 offset = 0; offset < size; offset += chunk_size) {
+            u64 to_write = std::min(chunk_size, size - offset);
+            writer.write(data.data() + offset, to_write);
+        }
+
+        ObjectPutParams params;
+        params.zone = ZoneId{1};
+        params.filename = nullptr;
+        params.mime_type = nullptr;
+
+        ObjectPutResult result;
+        writer.commit(params, &result);
+        benchmark::DoNotOptimize(result);
+    }
+
+    state.SetBytesProcessed(static_cast<int64_t>(state.iterations()) * size);
+    state.SetItemsProcessed(state.iterations());
+}
+BENCHMARK(BM_ObjectPutStream)
+    ->Arg(4096)
+    ->Arg(64 * 1024)
+    ->Arg(1024 * 1024)
+    ->Arg(15 * 1024 * 1024);
+
 // ============================================================================
 // Single-Threaded Get Benchmarks
 // ============================================================================
@@ -495,6 +537,85 @@ static void BM_ObjectMixedWorkload(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations());
 }
 BENCHMARK(BM_ObjectMixedWorkload);
+
+// ============================================================================
+// Delete and GC Benchmarks
+// ============================================================================
+
+static void BM_ObjectDelete(benchmark::State& state) {
+    InitializeObjectStore();
+
+    std::vector<u8> data(1024, 0xAA);
+    std::vector<ObjectKey> keys;
+
+    // Pre-fill enough objects
+    // We need enough objects for the entire benchmark run, or we refill in loop
+    // Since state.iterations() is not known upfront, we can do it per iteration
+    
+    // Actually, simpler: Put one object, delete it, repeat.
+    // But object_put might be slow.
+    // Better: Measure pure delete time.
+    // We can put N objects in Setup, then delete them in loop.
+    // But if we run out, we need to pause and refill.
+
+    const int batch_size = 1000;
+    
+    for (auto _ : state) {
+        state.PauseTiming();
+        keys.clear();
+        for(int i=0; i<batch_size; ++i) {
+             data[0] = static_cast<u8>(i & 0xFF); // vary content
+             ObjectPutParams params;
+             params.zone = ZoneId{1};
+             params.data = data.data();
+             params.size_bytes = data.size();
+             params.filename = nullptr;
+             params.mime_type = nullptr;
+             ObjectPutResult res;
+             object_put(params, &res);
+             keys.push_back(res.key);
+        }
+        state.ResumeTiming();
+
+        for(const auto& key : keys) {
+            object_delete(key);
+        }
+    }
+    
+    state.SetItemsProcessed(state.iterations() * batch_size);
+}
+BENCHMARK(BM_ObjectDelete);
+
+static void BM_ObjectGC(benchmark::State& state) {
+    InitializeObjectStore();
+
+    std::vector<u8> data(1024, 0xBB);
+    const int batch_size = 1000;
+
+    for (auto _ : state) {
+        state.PauseTiming();
+        // Setup: Put objects and Delete them so they are ready for GC
+        for(int i=0; i<batch_size; ++i) {
+             data[0] = static_cast<u8>(i & 0xFF);
+             ObjectPutParams params;
+             params.zone = ZoneId{2}; // Use a specific zone
+             params.data = data.data();
+             params.size_bytes = data.size();
+             params.filename = nullptr;
+             params.mime_type = nullptr;
+             ObjectPutResult res;
+             object_put(params, &res);
+             object_delete(res.key);
+        }
+        state.ResumeTiming();
+
+        u64 deleted_count = 0;
+        object_gc(ZoneId{2}, &deleted_count);
+    }
+    
+    state.SetItemsProcessed(state.iterations() * batch_size);
+}
+BENCHMARK(BM_ObjectGC);
 
 // ============================================================================
 // Comparison with Old Database Layer (if available)

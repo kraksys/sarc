@@ -5,14 +5,15 @@
 -export([start/2, stop/1]).
 
 -define(DEFAULT_HTTP_PORT, 8080).
--define(DEFAULT_DATA_ROOT, "/tmp/sarc_data").
--define(DEFAULT_DB_PATH, "/tmp/sarc.db").
 
 %%====================================================================
 %% API
 %%====================================================================
 
 start(_StartType, _StartArgs) ->
+    %% Setup environment variables for NIF and Port
+    ok = setup_env(),
+
     %% Load NIF library
     ok = ensure_nif_loaded(),
 
@@ -20,10 +21,17 @@ start(_StartType, _StartArgs) ->
     ok = ensure_port_initialized(),
 
     %% Get configuration
-    HttpPort = application:get_env(sarc_gateway, http_port, ?DEFAULT_HTTP_PORT),
+    HttpPort = get_http_port(),
 
     %% Start Cowboy HTTP listener
     ok = start_http_listener(HttpPort),
+
+    %% Start pg scope for pubsub
+    case pg:start_link(sarc_pubsub) of
+        {ok, _} -> ok;
+        {error, {already_started, _}} -> ok;
+        PgError -> error(PgError)
+    end,
 
     %% Start supervisor tree
     case sarc_gateway_sup:start_link() of
@@ -44,8 +52,58 @@ stop(_State) ->
 %% Internal functions
 %%====================================================================
 
+setup_env() ->
+    Home0 = os:getenv("HOME"),
+    Home = case Home0 of
+        false -> "/tmp";
+        V -> V
+    end,
+    DefaultDataRoot = filename:join(Home, "sarc"),
+    DefaultDbPath = filename:join(DefaultDataRoot, "sarc.db"),
+
+    %% Set SARC_DATA_ROOT if not present
+    case os:getenv("SARC_DATA_ROOT") of
+        false -> 
+            os:putenv("SARC_DATA_ROOT", DefaultDataRoot),
+            ok;
+        _ -> ok
+    end,
+
+    %% Set SARC_DB_PATH if not present
+    case os:getenv("SARC_DB_PATH") of
+        false -> os:putenv("SARC_DB_PATH", DefaultDbPath);
+        _ -> ok
+    end,
+
+    %% Ensure directories exist (even if env vars were already set by caller/test)
+    DataRoot = os:getenv("SARC_DATA_ROOT"),
+    DbPath = os:getenv("SARC_DB_PATH"),
+    filelib:ensure_dir(filename:join(DataRoot, "anyfile")),
+    filelib:ensure_dir(DbPath),
+    io:format("SARC env: data_root=~s db_path=~s~n", [DataRoot, DbPath]),
+    ok.
+
+get_http_port() ->
+    %% Prefer OS env override (useful for tests / multi-instance dev)
+    case os:getenv("SARC_HTTP_PORT") of
+        false ->
+            application:get_env(sarc_gateway, http_port, ?DEFAULT_HTTP_PORT);
+        PortStr ->
+            try
+                list_to_integer(PortStr)
+            catch
+                _:_ -> application:get_env(sarc_gateway, http_port, ?DEFAULT_HTTP_PORT)
+            end
+    end.
+
 ensure_nif_loaded() ->
-    %% NIF is loaded via on_load in sarc_nif module
+    %% Load NIF explicitly after env setup
+    ok = case sarc_nif:load() of
+        ok -> ok;
+        {error, Reason} ->
+            io:format("Warning: NIF load failed: ~p~n", [Reason]),
+            ok
+    end,
     %% Verify it's available by attempting a simple call
     try
         %% Try a harmless existence check - this will only work if NIF is loaded

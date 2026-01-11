@@ -16,6 +16,7 @@ content_types_provided(Req, State) ->
     ], Req, State}.
 
 query_to_json(Req, State = #{zone := ZoneBin}) ->
+    io:format("DEBUG: query_to_json called for zone ~p~n", [ZoneBin]),
     case sarc_handler_utils:parse_zone(ZoneBin) of
         {ok, Zone} ->
             %% Parse query parameters
@@ -24,15 +25,22 @@ query_to_json(Req, State = #{zone := ZoneBin}) ->
             Limit = sarc_handler_utils:parse_limit(
                 proplists:get_value(<<"limit">>, QsVals, <<"100">>)),
 
-            case sarc_nif:object_query_nif(Zone, Filter, Limit) of
+            io:format("DEBUG: Calling sarc_nif:object_query_nif(~p, ~p, ~p)~n", [Zone, Filter, Limit]),
+            Result = sarc_nif:object_query_nif(Zone, Filter, Limit),
+            io:format("DEBUG: sarc_nif result: ~p~n", [Result]),
+
+            case Result of
                 {ok, Results} ->
+                    io:format("DEBUG: Formatting results...~n"),
+                    Formatted = [sarc_handler_utils:format_key(Item) || Item <- Results],
                     Response = #{
-                        results => [sarc_handler_utils:format_key({Z, H}) || {Z, H} <- Results],
+                        results => Formatted,
                         count => length(Results)
                     },
                     Json = jsx:encode(Response),
                     {Json, Req, State};
                 {error, Reason} ->
+                    io:format("DEBUG: Error reason: ~p~n", [Reason]),
                     {Code, Msg} = sarc_handler_utils:map_error(Reason),
                     {halt, cowboy_req:reply(Code, #{}, Msg, Req), State}
             end;

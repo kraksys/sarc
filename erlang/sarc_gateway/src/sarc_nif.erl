@@ -13,19 +13,26 @@
 
 %% API exports
 -export([
+    load/0,
     object_get/2,
+    object_get_metadata/2,
     object_exists/2,
-    object_query/3
+    object_query/3,
+    object_count/1,
+    object_db_info/0
 ]).
 
 %% NIF stubs (replaced by C++ implementation)
 -export([
     object_get_nif/2,
+    object_get_metadata_nif/2,
     object_exists_nif/2,
-    object_query_nif/3
+    object_query_nif/3,
+    object_count_nif/1,
+    object_db_info_nif/0
 ]).
 
--on_load(init/0).
+%% NIF is loaded explicitly by sarc_gateway_app after env setup.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -64,6 +71,19 @@ object_get(ZoneId, Hash) ->
         ok ->
             case sarc_codec:validate_hash256(Hash) of
                 ok -> object_get_nif(ZoneId, Hash);
+                {error, _} -> {error, invalid}
+            end;
+        {error, _} -> {error, invalid}
+    end.
+
+%% @doc Retrieve object metadata (including filesystem path)
+-spec object_get_metadata(zone_id(), hash256()) ->
+    {ok, object_meta()} | {error, error_reason()}.
+object_get_metadata(ZoneId, Hash) ->
+    case sarc_codec:validate_zone_id(ZoneId) of
+        ok ->
+            case sarc_codec:validate_hash256(Hash) of
+                ok -> object_get_metadata_nif(ZoneId, Hash);
                 {error, _} -> {error, invalid}
             end;
         {error, _} -> {error, invalid}
@@ -110,12 +130,29 @@ object_query(ZoneId, Filter, Limit) when is_integer(Limit), Limit > 0 ->
 object_query(_, _, _) ->
     {error, invalid}.
 
+%% @doc Count objects in a zone
+-spec object_count(zone_id()) ->
+    {ok, non_neg_integer()} | {error, error_reason()}.
+object_count(ZoneId) ->
+    case sarc_codec:validate_zone_id(ZoneId) of
+        ok -> object_count_nif(ZoneId);
+        {error, _} -> {error, invalid}
+    end.
+
+%% @doc Get DB info used by NIF (debug)
+object_db_info() ->
+    object_db_info_nif().
+
 %%%===================================================================
 %%% NIF Stubs (Replaced by C++ Implementation)
 %%%===================================================================
 
 %% @private
 object_get_nif(_ZoneId, _Hash) ->
+    erlang:nif_error(nif_not_loaded).
+
+%% @private
+object_get_metadata_nif(_ZoneId, _Hash) ->
     erlang:nif_error(nif_not_loaded).
 
 %% @private
@@ -126,21 +163,47 @@ object_exists_nif(_ZoneId, _Hash) ->
 object_query_nif(_ZoneId, _Filter, _Limit) ->
     erlang:nif_error(nif_not_loaded).
 
+%% @private
+object_count_nif(_ZoneId) ->
+    erlang:nif_error(nif_not_loaded).
+
+%% @private
+object_db_info_nif() ->
+    erlang:nif_error(nif_not_loaded).
+
 %%%===================================================================
 %%% Internal Functions
 %%%===================================================================
 
 %% @private
-%% Initialize NIF library
-init() ->
+%% Load NIF library (explicit)
+load() ->
     case code:priv_dir(sarc_gateway) of
         {error, bad_name} ->
             % Development mode: try relative path
             SoPath = filename:join(["..", "priv", "sarc_nif"]),
-            erlang:load_nif(SoPath, 0);
+            normalize_load_result(erlang:load_nif(SoPath, load_info()));
         PrivDir ->
             SoPath = filename:join(PrivDir, "sarc_nif"),
-            erlang:load_nif(SoPath, 0)
+            normalize_load_result(erlang:load_nif(SoPath, load_info()))
+    end.
+
+normalize_load_result(ok) -> ok;
+normalize_load_result({error, {reload, _}}) -> ok;
+normalize_load_result({error, {already_loaded, _}}) -> ok;
+normalize_load_result(Err) -> Err.
+
+load_info() ->
+    DataRoot = os:getenv("SARC_DATA_ROOT"),
+    DbPath = os:getenv("SARC_DB_PATH"),
+    Map0 = #{},
+    Map1 = case DataRoot of
+        false -> Map0;
+        _ -> Map0#{data_root => list_to_binary(DataRoot)}
+    end,
+    case DbPath of
+        false -> Map1;
+        _ -> Map1#{db_path => list_to_binary(DbPath)}
     end.
 
 %% @private

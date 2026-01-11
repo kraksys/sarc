@@ -235,7 +235,7 @@ static void BM_ObjectPutMetadata(benchmark::State& state) {
         snprintf(fs_path, sizeof(fs_path), "/data/objects/1/%02x/%02x/%08x.dat",
                  (obj_counter >> 8) & 0xFF, obj_counter & 0xFF, obj_counter);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = data_size;
         params.fs_path = fs_path;
@@ -267,7 +267,7 @@ static void BM_ObjectGetMetadata(benchmark::State& state) {
         snprintf(fs_path, sizeof(fs_path), "/data/objects/1/%02x/%02x/%08x.dat",
                  (i >> 8) & 0xFF, i & 0xFF, i);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = data_size;
         params.fs_path = fs_path;
@@ -298,7 +298,7 @@ static void BM_ObjectExists(benchmark::State& state) {
 
     ObjectKey key = make_bench_object_key(1, 1);
 
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 1024;
     params.fs_path = "/data/objects/1/00/01/test.dat";
@@ -331,7 +331,7 @@ static void BM_ObjectDelete(benchmark::State& state) {
         snprintf(fs_path, sizeof(fs_path), "/data/objects/1/%02x/%02x/%08x.dat",
                  (obj_counter >> 8) & 0xFF, obj_counter & 0xFF, obj_counter);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = 512;
         params.fs_path = fs_path;
@@ -355,7 +355,7 @@ static void BM_ObjectIncrementRefcount(benchmark::State& state) {
 
     // Pre-create object
     ObjectKey key = make_bench_object_key(1, 1);
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 2048;
     params.fs_path = "/data/objects/1/00/01/refcount_test.dat";
@@ -378,7 +378,7 @@ static void BM_ObjectDecrementRefcount(benchmark::State& state) {
 
     // Pre-create object with high refcount
     ObjectKey key = make_bench_object_key(1, 1);
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 2048;
     params.fs_path = "/data/objects/1/00/01/refcount_test.dat";
@@ -416,7 +416,7 @@ static void BM_ObjectGcQuery(benchmark::State& state) {
         snprintf(fs_path, sizeof(fs_path), "/data/objects/1/%02x/%02x/orphan%d.dat",
                  (i >> 8) & 0xFF, i & 0xFF, i);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = 4096;
         params.fs_path = fs_path;
@@ -456,21 +456,21 @@ static void BM_ObjectListQuery(benchmark::State& state) {
         snprintf(fs_path, sizeof(fs_path), "/data/objects/1/%02x/%02x/list%d.dat",
                  (i >> 8) & 0xFF, i & 0xFF, i);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = 1000 + (i * 10);  // Varying sizes
         params.fs_path = fs_path;
         db_object_put_metadata(handle, params);
     }
 
-    DbObjectQueryFilter filter;
+    DbObjectQueryFilter filter{};
     filter.min_size_bytes = 5000;
     filter.max_size_bytes = 7000;
     filter.created_after = 0;
     filter.created_before = 0;
     filter.limit = 100;
 
-    ObjectKey results[100];
+    DbObjectQueryResult results[100];
 
     for (auto _ : state) {
         u32 count = 100;
@@ -668,7 +668,7 @@ static void BM_IntegratedWorkload(benchmark::State& state) {
         snprintf(fs_path, sizeof(fs_path), "/data/objects/%u/%02x/%02x/%08x.dat",
                  zone_counter, (obj_counter >> 8) & 0xFF, obj_counter & 0xFF, obj_counter);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = 1024;
         params.fs_path = fs_path;

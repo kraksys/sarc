@@ -20,6 +20,7 @@ namespace sarc::core {
         Network,
         Unsupported,
         Unavailable,
+        OutOfMemory,
     };
 
     enum class StatusDomain : u16 {

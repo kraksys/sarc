@@ -329,7 +329,7 @@ TEST(Database, ObjectPutAndGetMetadata) {
     ObjectKey key = make_test_object_key(1, 0x42);
 
     // Put metadata with filesystem path
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 4096;
     params.fs_path = "/data/objects/1/ab/cd/abcdef1234.dat";
@@ -355,7 +355,7 @@ TEST(Database, ObjectPutEmptyMetadata) {
 
     ObjectKey key = make_test_object_key(1, 0x11);
 
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 0;
     params.fs_path = "/data/objects/1/00/00/empty.dat";
@@ -379,7 +379,7 @@ TEST(Database, ObjectIncrementRefcount) {
     ObjectKey key = make_test_object_key(1, 0x99);
 
     // Put initial metadata
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 1024;
     params.fs_path = "/data/objects/1/99/99/test.dat";
@@ -410,7 +410,7 @@ TEST(Database, ObjectDecrementRefcount) {
     ObjectKey key = make_test_object_key(1, 0x88);
 
     // Put metadata
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 2048;
     params.fs_path = "/data/objects/1/88/88/test.dat";
@@ -461,7 +461,7 @@ TEST(Database, ObjectGcQuery) {
     for (u32 i = 0; i < 5; ++i) {
         ObjectKey key = make_test_object_key(1, i);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = 1024;
         char path[256];
@@ -494,7 +494,7 @@ TEST(Database, ObjectListQuery) {
     for (u32 i = 0; i < 10; ++i) {
         ObjectKey key = make_test_object_key(1, i);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = 1000 + (i * 100);  // Varying sizes
         char path[256];
@@ -505,14 +505,14 @@ TEST(Database, ObjectListQuery) {
     }
 
     // Query with size filter
-    DbObjectQueryFilter filter;
+    DbObjectQueryFilter filter{};
     filter.min_size_bytes = 1500;
     filter.max_size_bytes = 2500;
     filter.created_after = 0;
     filter.created_before = 0;
     filter.limit = 20;
 
-    ObjectKey results[20];
+    DbObjectQueryResult results[20];
     u32 count = 20;
     Status s = db_object_list(handle, ZoneId{1}, filter, results, &count);
     EXPECT_TRUE(is_ok(s));
@@ -529,7 +529,7 @@ TEST(Database, ObjectExists) {
 
     ObjectKey key = make_test_object_key(1, 0x33);
 
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 512;
     params.fs_path = "/data/objects/1/33/33/test.dat";
@@ -557,7 +557,7 @@ TEST(Database, ObjectDelete) {
 
     ObjectKey key = make_test_object_key(1, 0x77);
 
-    DbObjectPutMetadataParams params;
+    DbObjectPutMetadataParams params{};
     params.key = key;
     params.size_bytes = 256;
     params.fs_path = "/data/objects/1/77/77/test.dat";
@@ -597,7 +597,7 @@ TEST(Database, ObjectMultipleInDifferentZones) {
     for (u32 zone = 1; zone <= 5; ++zone) {
         ObjectKey key = make_test_object_key(zone, 0x12);
 
-        DbObjectPutMetadataParams params;
+        DbObjectPutMetadataParams params{};
         params.key = key;
         params.size_bytes = 4096;
         char path[256];
@@ -633,7 +633,7 @@ TEST(Database, FileCreateAndGet) {
     obj_key.zone = ZoneId{1};
     for (auto& b : obj_key.content.b) b = 0xCD;
 
-    DbObjectPutMetadataParams obj_params;
+    DbObjectPutMetadataParams obj_params{};
     obj_params.key = obj_key;
     obj_params.size_bytes = 10;
     obj_params.fs_path = "/data/objects/1/cd/cd/test_file.dat";
@@ -676,7 +676,7 @@ TEST(Database, FileCreateDuplicate) {
     obj_key.zone = ZoneId{1};
     for (auto& b : obj_key.content.b) b = 0xEF;
 
-    DbObjectPutMetadataParams obj_params;
+    DbObjectPutMetadataParams obj_params{};
     obj_params.key = obj_key;
     obj_params.size_bytes = 8;
     obj_params.fs_path = "/data/objects/1/ef/ef/test_file2.dat";
@@ -728,7 +728,7 @@ TEST(Database, FileDelete) {
     obj_key.zone = ZoneId{1};
     for (auto& b : obj_key.content.b) b = 0x12;
 
-    DbObjectPutMetadataParams obj_params;
+    DbObjectPutMetadataParams obj_params{};
     obj_params.key = obj_key;
     obj_params.size_bytes = 16;
     obj_params.fs_path = "/data/objects/1/12/12/test_file3.dat";

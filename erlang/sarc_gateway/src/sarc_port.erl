@@ -19,7 +19,11 @@
     stop/0,
     object_put/4,
     object_delete/2,
-    object_gc/1
+    object_gc/1,
+    put_stream_start/1,
+    put_stream_chunk/2,
+    put_stream_abort/1,
+    put_stream_finish/4
 ]).
 
 %% gen_server callbacks
@@ -41,6 +45,7 @@
 -type object_key() :: sarc_codec:object_key().
 -type object_meta() :: sarc_nif:object_meta().
 -type error_reason() :: sarc_nif:error_reason().
+-type stream_handle() :: integer().
 
 -define(SERVER, ?MODULE).
 -define(DEFAULT_TIMEOUT, 30000).  % 30 seconds
@@ -50,6 +55,11 @@
 -define(OP_PUT_OBJECT, 1).
 -define(OP_DELETE_OBJECT, 2).
 -define(OP_GC, 3).
+-define(OP_PUT_STREAM_START, 4).
+-define(OP_PUT_STREAM_CHUNK, 5).
+-define(OP_PUT_STREAM_FINISH, 6).
+-define(OP_PUT_STREAM_ABORT, 7).
+-define(OP_PUT_STREAM_CHUNK_ASYNC, 8).
 
 %% State record
 -record(state, {
@@ -99,6 +109,28 @@ object_put(ZoneId, Data, Filename, MimeType)
     Request = {put, ZoneId, Data, Filename, MimeType},
     gen_server:call(?SERVER, Request, ?DEFAULT_TIMEOUT).
 
+%% @doc Start a streaming upload
+-spec put_stream_start(zone_id()) -> {ok, stream_handle()} | {error, error_reason()}.
+put_stream_start(ZoneId) when is_integer(ZoneId) ->
+    gen_server:call(?SERVER, {put_stream_start, ZoneId}, ?DEFAULT_TIMEOUT).
+
+%% @doc Send a chunk of data for streaming upload
+-spec put_stream_chunk(stream_handle(), binary()) -> ok | {error, error_reason()}.
+put_stream_chunk(Handle, Data) when is_integer(Handle), is_binary(Data) ->
+    gen_server:call(?SERVER, {put_stream_chunk, Handle, Data}, ?PORT_TIMEOUT).
+
+%% @doc Abort streaming upload (cleanup server-side temporary state)
+-spec put_stream_abort(stream_handle()) -> ok | {error, error_reason()}.
+put_stream_abort(Handle) when is_integer(Handle) ->
+    gen_server:call(?SERVER, {put_stream_abort, Handle}, ?DEFAULT_TIMEOUT).
+
+%% @doc Finish streaming upload
+-spec put_stream_finish(stream_handle(), zone_id(), binary(), binary()) ->
+    {ok, object_key(), object_meta(), boolean()} | {error, error_reason()}.
+put_stream_finish(Handle, ZoneId, Filename, MimeType)
+  when is_integer(Handle), is_integer(ZoneId), is_binary(Filename), is_binary(MimeType) ->
+    gen_server:call(?SERVER, {put_stream_finish, Handle, ZoneId, Filename, MimeType}, ?DEFAULT_TIMEOUT).
+
 %% @doc Delete object (decrement refcount)
 %%
 %% Example:
@@ -142,6 +174,23 @@ handle_call({put, ZoneId, Data, Filename, MimeType}, From, State) ->
         {error, _} ->
             {reply, {error, invalid}, State}
     end;
+
+handle_call({put_stream_start, ZoneId}, From, State) ->
+    case sarc_codec:validate_zone_id(ZoneId) of
+        ok ->
+            send_port_command(State#state.port, ?OP_PUT_STREAM_START, ZoneId, From, State);
+        {error, _} ->
+            {reply, {error, invalid}, State}
+    end;
+
+handle_call({put_stream_chunk, Handle, Data}, From, State) ->
+    send_port_command(State#state.port, ?OP_PUT_STREAM_CHUNK, {Handle, Data}, From, State);
+
+handle_call({put_stream_abort, Handle}, From, State) ->
+    send_port_command(State#state.port, ?OP_PUT_STREAM_ABORT, Handle, From, State);
+
+handle_call({put_stream_finish, Handle, ZoneId, Filename, MimeType}, From, State) ->
+    send_port_command(State#state.port, ?OP_PUT_STREAM_FINISH, {Handle, ZoneId, Filename, MimeType}, From, State);
 
 handle_call({delete, ZoneId, Hash}, From, State) ->
     case sarc_codec:validate_zone_id(ZoneId) of
@@ -238,11 +287,41 @@ open_port_driver() ->
 try_open_port(PortPath) ->
     case filelib:is_file(PortPath) of
         true ->
+            %% Always pass SARC_DATA_ROOT / SARC_DB_PATH to the port process.
+            %%
+            %% If we pass `{env, []}` (or omit env vars), the port can fall back to
+            %% its compiled defaults (/tmp/...), which diverges from the NIF that
+            %% reads the VM's environment. That causes "PUT succeeds but query is empty".
+            Home0 = os:getenv("HOME"),
+            Home = case Home0 of
+                false -> "/tmp";
+                V -> V
+            end,
+            DefaultDataRoot = filename:join(Home, "sarc"),
+            DefaultDbPath = filename:join(DefaultDataRoot, "sarc.db"),
+
+            DataRoot = case os:getenv("SARC_DATA_ROOT") of
+                false -> DefaultDataRoot;
+                DataRoot0 -> DataRoot0
+            end,
+            DbPath = case os:getenv("SARC_DB_PATH") of
+                false -> DefaultDbPath;
+                DbPath0 -> DbPath0
+            end,
+
+            %% Ensure target directory exists (mirrors sarc_gateway_app:setup_env/0)
+            filelib:ensure_dir(filename:join(DataRoot, "anyfile")),
+            filelib:ensure_dir(DbPath),
+
+            io:format("sarc_port env: data_root=~s db_path=~s~n", [DataRoot, DbPath]),
+            Env = [{"SARC_DATA_ROOT", DataRoot}, {"SARC_DB_PATH", DbPath}],
+
             Port = open_port({spawn_executable, PortPath}, [
                 {packet, 4},  % 4-byte length prefix
                 binary,
                 exit_status,
-                use_stdio
+                use_stdio,
+                {env, Env}
             ]),
             {ok, Port};
         false ->

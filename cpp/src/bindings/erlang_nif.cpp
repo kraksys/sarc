@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <sys/stat.h>
+#include <string>
 
 #include <erl_nif.h>
 
@@ -55,29 +57,62 @@ ERL_NIF_TERM hash256_to_erl_binary(ErlNifEnv* env, const Hash256& hash) noexcept
     return enif_make_binary(env, &bin);
 }
 
-// Convert ObjectMeta to Erlang map
-ERL_NIF_TERM object_meta_to_erl_map(ErlNifEnv* env, const ObjectMeta& meta) noexcept {
+// Convert ObjectGetResult to Erlang map
+ERL_NIF_TERM object_result_to_erl_map(ErlNifEnv* env, const ObjectGetResult& result) noexcept {
     ERL_NIF_TERM map = enif_make_new_map(env);
 
     // Add size_bytes
     ERL_NIF_TERM size_key = enif_make_atom(env, "size");
-    ERL_NIF_TERM size_val = enif_make_uint64(env, meta.size_bytes);
+    ERL_NIF_TERM size_val = enif_make_uint64(env, result.meta.size_bytes);
     enif_make_map_put(env, map, size_key, size_val, &map);
 
     // Add refcount
     ERL_NIF_TERM refcount_key = enif_make_atom(env, "refcount");
-    ERL_NIF_TERM refcount_val = enif_make_uint(env, meta.refcount);
+    ERL_NIF_TERM refcount_val = enif_make_uint(env, result.meta.refcount);
     enif_make_map_put(env, map, refcount_key, refcount_val, &map);
 
     // Add created_at
     ERL_NIF_TERM created_key = enif_make_atom(env, "created_at");
-    ERL_NIF_TERM created_val = enif_make_int64(env, meta.created_at);
+    ERL_NIF_TERM created_val = enif_make_int64(env, result.meta.created_at);
     enif_make_map_put(env, map, created_key, created_val, &map);
 
     // Add updated_at
     ERL_NIF_TERM updated_key = enif_make_atom(env, "updated_at");
-    ERL_NIF_TERM updated_val = enif_make_int64(env, meta.updated_at);
+    ERL_NIF_TERM updated_val = enif_make_int64(env, result.meta.updated_at);
     enif_make_map_put(env, map, updated_key, updated_val, &map);
+
+    // Add filename (if present)
+    if (result.filename[0] != '\0') {
+        ERL_NIF_TERM filename_key = enif_make_atom(env, "filename");
+        ErlNifBinary filename_bin;
+        size_t len = std::strlen(result.filename);
+        if (enif_alloc_binary(len, &filename_bin)) {
+            std::memcpy(filename_bin.data, result.filename, len);
+            enif_make_map_put(env, map, filename_key, enif_make_binary(env, &filename_bin), &map);
+        }
+    }
+
+    // Add mime_type (if present)
+    if (result.mime_type[0] != '\0') {
+        ERL_NIF_TERM mime_key = enif_make_atom(env, "mime_type");
+        ErlNifBinary mime_bin;
+        size_t len = std::strlen(result.mime_type);
+        if (enif_alloc_binary(len, &mime_bin)) {
+            std::memcpy(mime_bin.data, result.mime_type, len);
+            enif_make_map_put(env, map, mime_key, enif_make_binary(env, &mime_bin), &map);
+        }
+    }
+
+    // Add fs_path
+    if (result.fs_path[0] != '\0') {
+        ERL_NIF_TERM path_key = enif_make_atom(env, "fs_path");
+        ErlNifBinary path_bin;
+        size_t len = std::strlen(result.fs_path);
+        if (enif_alloc_binary(len, &path_bin)) {
+            std::memcpy(path_bin.data, result.fs_path, len);
+            enif_make_map_put(env, map, path_key, enif_make_binary(env, &path_bin), &map);
+        }
+    }
 
     return map;
 }
@@ -193,12 +228,45 @@ static ERL_NIF_TERM sarc_object_get_nif(ErlNifEnv* env, int argc, const ERL_NIF_
     std::memcpy(data_bin.data, buffer.data(), result.bytes_read);
 
     // Convert metadata to Erlang map
-    ERL_NIF_TERM meta_map = object_meta_to_erl_map(env, result.meta);
+    ERL_NIF_TERM meta_map = object_result_to_erl_map(env, result);
 
     // Return {ok, Data, Meta}
     return enif_make_tuple3(env,
         enif_make_atom(env, "ok"),
         enif_make_binary(env, &data_bin),
+        meta_map);
+}
+
+// object_get_metadata_nif(ZoneId :: non_neg_integer(), Hash :: binary()) ->
+//     {ok, Meta :: map()} | {error, Reason :: atom()}
+static ERL_NIF_TERM sarc_object_get_metadata_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 2) {
+        return enif_make_badarg(env);
+    }
+
+    unsigned int zone_id;
+    if (!enif_get_uint(env, argv[0], &zone_id)) {
+        return enif_make_badarg(env);
+    }
+
+    Hash256 hash;
+    Status s = erl_binary_to_hash256(env, argv[1], &hash);
+    if (!is_ok(s)) {
+        return enif_make_badarg(env);
+    }
+
+    ObjectKey key{ZoneId{zone_id}, hash};
+    ObjectGetResult result;
+    s = object_get_metadata(key, &result);
+
+    if (!is_ok(s)) {
+        return status_to_erl_error(env, s);
+    }
+
+    ERL_NIF_TERM meta_map = object_result_to_erl_map(env, result);
+
+    return enif_make_tuple2(env,
+        enif_make_atom(env, "ok"),
         meta_map);
 }
 
@@ -298,7 +366,7 @@ static ERL_NIF_TERM sarc_object_query_nif(ErlNifEnv* env, int argc, const ERL_NI
     }
 
     // Allocate results buffer
-    std::vector<ObjectKey> results(limit);
+    std::vector<ObjectQueryResult> results(limit);
     u32 count = limit;
 
     // Execute query
@@ -307,24 +375,127 @@ static ERL_NIF_TERM sarc_object_query_nif(ErlNifEnv* env, int argc, const ERL_NI
         return status_to_erl_error(env, s);
     }
 
-    // Build Erlang list of tuples [{ZoneId, Hash}, ...]
+    // Build Erlang list of maps [#{zone=>, hash=>, filename=>...}, ...]
     ERL_NIF_TERM result_list = enif_make_list(env, 0);  // Empty list
 
     // Build list in reverse order (more efficient)
     for (u32 i = count; i > 0; --i) {
-        const ObjectKey& key = results[i - 1];
+        const ObjectQueryResult& res = results[i - 1];
 
-        ERL_NIF_TERM zone_term = enif_make_uint(env, key.zone.v);
-        ERL_NIF_TERM hash_term = hash256_to_erl_binary(env, key.content);
-        ERL_NIF_TERM tuple = enif_make_tuple2(env, zone_term, hash_term);
+        ERL_NIF_TERM map = enif_make_new_map(env);
 
-        result_list = enif_make_list_cell(env, tuple, result_list);
+        // Add zone
+        ERL_NIF_TERM zone_key = enif_make_atom(env, "zone");
+        ERL_NIF_TERM zone_val = enif_make_uint(env, res.key.zone.v);
+        enif_make_map_put(env, map, zone_key, zone_val, &map);
+
+        // Add hash
+        ERL_NIF_TERM hash_key = enif_make_atom(env, "hash");
+        ERL_NIF_TERM hash_val = hash256_to_erl_binary(env, res.key.content);
+        enif_make_map_put(env, map, hash_key, hash_val, &map);
+
+        // Add size
+        ERL_NIF_TERM size_key = enif_make_atom(env, "size");
+        ERL_NIF_TERM size_val = enif_make_uint64(env, res.meta.size_bytes);
+        enif_make_map_put(env, map, size_key, size_val, &map);
+
+        // Add created_at
+        ERL_NIF_TERM created_key = enif_make_atom(env, "created_at");
+        ERL_NIF_TERM created_val = enif_make_int64(env, res.meta.created_at);
+        enif_make_map_put(env, map, created_key, created_val, &map);
+
+        // Add filename (if present)
+        if (res.filename[0] != '\0') {
+            ERL_NIF_TERM filename_key = enif_make_atom(env, "filename");
+            ErlNifBinary filename_bin;
+            size_t len = std::strlen(res.filename);
+            if (enif_alloc_binary(len, &filename_bin)) {
+                std::memcpy(filename_bin.data, res.filename, len);
+                enif_make_map_put(env, map, filename_key, enif_make_binary(env, &filename_bin), &map);
+            }
+        }
+
+        // Add mime_type (if present)
+        if (res.mime_type[0] != '\0') {
+            ERL_NIF_TERM mime_key = enif_make_atom(env, "mime_type");
+            ErlNifBinary mime_bin;
+            size_t len = std::strlen(res.mime_type);
+            if (enif_alloc_binary(len, &mime_bin)) {
+                std::memcpy(mime_bin.data, res.mime_type, len);
+                enif_make_map_put(env, map, mime_key, enif_make_binary(env, &mime_bin), &map);
+            }
+        }
+
+        result_list = enif_make_list_cell(env, map, result_list);
     }
 
     // Return {ok, Results}
     return enif_make_tuple2(env,
         enif_make_atom(env, "ok"),
         result_list);
+}
+
+// object_count_nif(ZoneId :: non_neg_integer()) ->
+//     {ok, Count :: non_neg_integer()} | {error, Reason :: atom()}
+static ERL_NIF_TERM sarc_object_count_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 1) {
+        return enif_make_badarg(env);
+    }
+
+    unsigned int zone_id;
+    if (!enif_get_uint(env, argv[0], &zone_id)) {
+        return enif_make_badarg(env);
+    }
+
+    u64 count = 0;
+    Status s = object_count(ZoneId{zone_id}, &count);
+    if (!is_ok(s)) {
+        return status_to_erl_error(env, s);
+    }
+
+    return enif_make_tuple2(env,
+        enif_make_atom(env, "ok"),
+        enif_make_uint64(env, count));
+}
+
+// object_db_info_nif() ->
+//     {ok, #{db_path := binary(), inode := non_neg_integer(), size := non_neg_integer()}} | {error, Reason}
+static ERL_NIF_TERM sarc_object_db_info_nif(ErlNifEnv* env, int argc, const ERL_NIF_TERM argv[]) {
+    if (argc != 0) {
+        return enif_make_badarg(env);
+    }
+
+    const char* db_path = nullptr;
+    Status s = object_db_filename(&db_path);
+    if (!is_ok(s) || !db_path) {
+        return status_to_erl_error(env, s);
+    }
+
+    struct stat st {};
+    int rc = stat(db_path, &st);
+    if (rc != 0) {
+        return enif_make_tuple2(env, enif_make_atom(env, "error"), enif_make_atom(env, "stat_failed"));
+    }
+
+    ERL_NIF_TERM map = enif_make_new_map(env);
+
+    ErlNifBinary path_bin;
+    size_t len = std::strlen(db_path);
+    if (enif_alloc_binary(len, &path_bin)) {
+        std::memcpy(path_bin.data, db_path, len);
+        ERL_NIF_TERM path_key = enif_make_atom(env, "db_path");
+        enif_make_map_put(env, map, path_key, enif_make_binary(env, &path_bin), &map);
+    }
+
+    ERL_NIF_TERM inode_key = enif_make_atom(env, "inode");
+    ERL_NIF_TERM inode_val = enif_make_uint64(env, static_cast<u64>(st.st_ino));
+    enif_make_map_put(env, map, inode_key, inode_val, &map);
+
+    ERL_NIF_TERM size_key = enif_make_atom(env, "size");
+    ERL_NIF_TERM size_val = enif_make_uint64(env, static_cast<u64>(st.st_size));
+    enif_make_map_put(env, map, size_key, size_val, &map);
+
+    return enif_make_tuple2(env, enif_make_atom(env, "ok"), map);
 }
 
 // ============================================================================
@@ -335,9 +506,41 @@ static int load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info) {
     // Initialize object store on NIF load
     ObjectStoreConfig cfg{};
 
-    // Read configuration from environment variables with defaults
-    const char* data_root = std::getenv("SARC_DATA_ROOT");
-    const char* db_path = std::getenv("SARC_DB_PATH");
+    // Read configuration from load_info map (preferred), fallback to env
+    const char* data_root = nullptr;
+    const char* db_path = nullptr;
+    std::string data_root_buf;
+    std::string db_path_buf;
+
+    if (enif_is_map(env, load_info)) {
+        ERL_NIF_TERM data_key = enif_make_atom(env, "data_root");
+        ERL_NIF_TERM db_key = enif_make_atom(env, "db_path");
+        ERL_NIF_TERM data_val;
+        ERL_NIF_TERM db_val;
+
+        if (enif_get_map_value(env, load_info, data_key, &data_val)) {
+            ErlNifBinary bin;
+            if (enif_inspect_binary(env, data_val, &bin)) {
+                data_root_buf.assign(reinterpret_cast<const char*>(bin.data), bin.size);
+                data_root = data_root_buf.c_str();
+            }
+        }
+
+        if (enif_get_map_value(env, load_info, db_key, &db_val)) {
+            ErlNifBinary bin;
+            if (enif_inspect_binary(env, db_val, &bin)) {
+                db_path_buf.assign(reinterpret_cast<const char*>(bin.data), bin.size);
+                db_path = db_path_buf.c_str();
+            }
+        }
+    }
+
+    if (!data_root) {
+        data_root = std::getenv("SARC_DATA_ROOT");
+    }
+    if (!db_path) {
+        db_path = std::getenv("SARC_DB_PATH");
+    }
 
     cfg.data_root = data_root ? data_root : "/tmp/sarc_data";
     cfg.db_path = db_path ? db_path : "/tmp/sarc.db";
@@ -379,8 +582,11 @@ static void unload(ErlNifEnv* env, void* priv_data) {
 // NIF function exports
 static ErlNifFunc nif_funcs[] = {
     {"object_get_nif", 2, sarc_object_get_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"object_get_metadata_nif", 2, sarc_object_get_metadata_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
     {"object_exists_nif", 2, sarc_object_exists_nif, 0},
-    {"object_query_nif", 3, sarc_object_query_nif, ERL_NIF_DIRTY_JOB_IO_BOUND}
+    {"object_query_nif", 3, sarc_object_query_nif, ERL_NIF_DIRTY_JOB_IO_BOUND},
+    {"object_count_nif", 1, sarc_object_count_nif, 0},
+    {"object_db_info_nif", 0, sarc_object_db_info_nif, 0}
 };
 
 // NIF module initialization macro

@@ -60,6 +60,9 @@ namespace sarc::db {
         sarc::core::ObjectKey key;
         u64 size_bytes;
         const char* fs_path;
+        const char* filename;
+        const char* mime_type;
+        const char* origin_path;
     };
 
     // Metadata-only result (no blob data)
@@ -70,6 +73,9 @@ namespace sarc::db {
         u64 updated_at;
         u64 verified_at;
         char fs_path[1024];
+        char filename[256];
+        char mime_type[128];
+        char origin_path[1024];
     };
 
     // Store metadata with filesystem path
@@ -105,9 +111,48 @@ namespace sarc::db {
         u64 created_before;
         u32 limit;
     };
+    // Result item for DB object list
+    struct DbObjectQueryResult {
+        sarc::core::ObjectKey key;
+        u64 size_bytes;
+        u32 refcount;
+        u64 created_at;
+        u64 updated_at;
+        char filename[256];
+        char mime_type[128];
+    };
+
     sarc::core::Status db_object_list(DbHandle db, sarc::core::ZoneId zone,
                                       const DbObjectQueryFilter& filter,
-                                      sarc::core::ObjectKey* results, u32* count) noexcept;
+                                      DbObjectQueryResult* results, u32* count) noexcept;
+
+    // =========================================================================
+    // FTS Search (best-effort; may fall back to LIKE)
+    // =========================================================================
+
+    struct DbObjectSearchResult {
+        sarc::core::ObjectKey key;
+        u64 size_bytes;
+        u32 refcount;
+        u64 created_at;
+        u64 updated_at;
+        char filename[256];
+        char mime_type[128];
+        char origin_path[1024];
+    };
+
+    sarc::core::Status db_object_search(DbHandle db,
+                                        sarc::core::ZoneId zone,
+                                        const char* query,
+                                        u32 limit,
+                                        DbObjectSearchResult* results,
+                                        u32* count) noexcept;
+
+    // Count objects for a zone.
+    sarc::core::Status db_object_count(DbHandle db, sarc::core::ZoneId zone, u64* out) noexcept;
+
+    // Return the active sqlite filename (main DB).
+    sarc::core::Status db_db_filename(DbHandle db, const char** out) noexcept;
 
     // =========================================================================
     // File Operations

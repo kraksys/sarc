@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
@@ -39,6 +40,18 @@ static ObjectStoreState g_state = {
 // ========================================================================
 // Internal Helpers
 // ========================================================================
+
+static void copy_cstr(char* dst, size_t dst_size, const char* src) noexcept {
+    if (!dst || dst_size == 0) {
+        return;
+    }
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+    std::strncpy(dst, src, dst_size - 1);
+    dst[dst_size - 1] = '\0';
+}
 
 // Convert hash to hex string
 static void hash_to_hex(const Hash256& hash, char* out, size_t out_size) {
@@ -237,15 +250,15 @@ Status object_put(const ObjectPutParams& params, ObjectPutResult* result) noexce
         result->meta.created_at = db_meta.created_at;
         result->meta.updated_at = db_meta.updated_at;
         result->deduplicated = true;
+        copy_cstr(result->filename, sizeof(result->filename), db_meta.filename);
+        copy_cstr(result->mime_type, sizeof(result->mime_type), db_meta.mime_type);
 
         return ok_status();
     }
 
     // Determine if we should compress
-    bool compress = should_compress(g_state.config.compression, params.mime_type, params.size_bytes);
-
-    // TODO: Implement compression (for now, always uncompressed)
-    compress = false;
+    // bool compress = should_compress(g_state.config.compression, params.mime_type, params.size_bytes);
+    bool compress = false; // Compression not yet supported
 
     // Construct filesystem path
     char fs_path[1024];
@@ -291,10 +304,13 @@ Status object_put(const ObjectPutParams& params, ObjectPutResult* result) noexce
     }
 
     // Insert metadata into database
-    db::DbObjectPutMetadataParams db_params;
+    db::DbObjectPutMetadataParams db_params{};
     db_params.key = key;
     db_params.size_bytes = params.size_bytes;
     db_params.fs_path = fs_path;
+    db_params.filename = params.filename;
+    db_params.mime_type = params.mime_type;
+    db_params.origin_path = params.origin_path;
 
     s = db::db_object_put_metadata(g_state.db, db_params);
     if (!is_ok(s)) {
@@ -307,9 +323,11 @@ Status object_put(const ObjectPutParams& params, ObjectPutResult* result) noexce
     result->key = key;
     result->meta.size_bytes = params.size_bytes;
     result->meta.refcount = 1;
-    result->meta.created_at = 0;  // TODO: Get from database
-    result->meta.updated_at = 0;
+    result->meta.created_at = static_cast<u64>(std::time(nullptr));
+    result->meta.updated_at = result->meta.created_at;
     result->deduplicated = false;
+    copy_cstr(result->filename, sizeof(result->filename), params.filename);
+    copy_cstr(result->mime_type, sizeof(result->mime_type), params.mime_type);
 
     return ok_status();
 }
@@ -333,6 +351,10 @@ Status object_get(const ObjectKey& key, u8* buffer, u64 buffer_size, ObjectGetRe
     Status s = db::db_object_get_metadata(g_state.db, key, &db_meta);
     if (!is_ok(s)) {
         return s;
+    }
+
+    if (db_meta.refcount == 0) {
+        return make_status(StatusDomain::Storage, StatusCode::NotFound);
     }
 
     // Validate buffer size
@@ -394,6 +416,65 @@ Status object_get(const ObjectKey& key, u8* buffer, u64 buffer_size, ObjectGetRe
     result->meta.updated_at = db_meta.updated_at;
     result->bytes_read = bytes_read;
 
+    std::strncpy(result->filename, db_meta.filename, sizeof(result->filename) - 1);
+    result->filename[sizeof(result->filename) - 1] = '\0';
+
+    std::strncpy(result->mime_type, db_meta.mime_type, sizeof(result->mime_type) - 1);
+    result->mime_type[sizeof(result->mime_type) - 1] = '\0';
+
+    std::strncpy(result->fs_path, db_meta.fs_path, sizeof(result->fs_path) - 1);
+    result->fs_path[sizeof(result->fs_path) - 1] = '\0';
+
+    std::strncpy(result->origin_path, db_meta.origin_path, sizeof(result->origin_path) - 1);
+    result->origin_path[sizeof(result->origin_path) - 1] = '\0';
+
+    return ok_status();
+}
+
+Status object_get_metadata(const ObjectKey& key, ObjectGetResult* result) noexcept {
+    if (!result) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+
+    if (!g_state.initialized) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+
+    // Validate key
+    if (!key.zone.is_valid() || zone_is_universal(key.zone)) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+
+    // Get metadata from database
+    db::DbObjectMetadata db_meta;
+    Status s = db::db_object_get_metadata(g_state.db, key, &db_meta);
+    if (!is_ok(s)) {
+        return s;
+    }
+
+    if (db_meta.refcount == 0) {
+        return make_status(StatusDomain::Storage, StatusCode::NotFound);
+    }
+
+    // Return result
+    result->meta.size_bytes = db_meta.size_bytes;
+    result->meta.refcount = db_meta.refcount;
+    result->meta.created_at = db_meta.created_at;
+    result->meta.updated_at = db_meta.updated_at;
+    result->bytes_read = 0; // No data read
+
+    std::strncpy(result->filename, db_meta.filename, sizeof(result->filename) - 1);
+    result->filename[sizeof(result->filename) - 1] = '\0';
+
+    std::strncpy(result->mime_type, db_meta.mime_type, sizeof(result->mime_type) - 1);
+    result->mime_type[sizeof(result->mime_type) - 1] = '\0';
+
+    std::strncpy(result->fs_path, db_meta.fs_path, sizeof(result->fs_path) - 1);
+    result->fs_path[sizeof(result->fs_path) - 1] = '\0';
+
+    std::strncpy(result->origin_path, db_meta.origin_path, sizeof(result->origin_path) - 1);
+    result->origin_path[sizeof(result->origin_path) - 1] = '\0';
+
     return ok_status();
 }
 
@@ -438,7 +519,7 @@ Status object_delete(const ObjectKey& key) noexcept {
 }
 
 Status object_query(ZoneId zone, const ObjectQueryFilter& filter,
-                    ObjectKey* results, u32* count) noexcept {
+                    ObjectQueryResult* results, u32* count) noexcept {
     if (!results || !count) {
         return make_status(StatusDomain::Storage, StatusCode::Invalid);
     }
@@ -460,8 +541,75 @@ Status object_query(ZoneId zone, const ObjectQueryFilter& filter,
     db_filter.created_before = filter.created_before;
     db_filter.limit = filter.limit;
 
-    // Query database
-    return db::db_object_list(g_state.db, zone, db_filter, results, count);
+    // Use DbObjectQueryResult which has the same layout as ObjectQueryResult
+    // (We cast to DbObjectQueryResult* since they are binary compatible)
+    static_assert(sizeof(db::DbObjectQueryResult) == sizeof(ObjectQueryResult));
+    
+    return db::db_object_list(g_state.db, zone, db_filter, 
+                             reinterpret_cast<db::DbObjectQueryResult*>(results), count);
+}
+
+Status object_count(ZoneId zone, u64* out) noexcept {
+    if (!out) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+    if (!g_state.initialized) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+    if (!zone.is_valid() || zone_is_universal(zone)) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+    return db::db_object_count(g_state.db, zone, out);
+}
+
+Status object_db_filename(const char** out) noexcept {
+    if (!out) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+    if (!g_state.initialized) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+    return db::db_db_filename(g_state.db, out);
+}
+
+Status object_search(ZoneId zone,
+                     const char* query,
+                     ObjectSearchResult* results,
+                     u32* count) noexcept {
+    if (!results || !count || !query) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+    if (!g_state.initialized) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+    if (!zone.is_valid() || zone_is_universal(zone)) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+    if (*count == 0) {
+        return ok_status();
+    }
+
+    std::vector<db::DbObjectSearchResult> tmp;
+    tmp.resize(*count);
+    u32 found = *count;
+    Status s = db::db_object_search(g_state.db, zone, query, *count, tmp.data(), &found);
+    if (!is_ok(s)) {
+        return s;
+    }
+
+    for (u32 i = 0; i < found; ++i) {
+        results[i].key = tmp[i].key;
+        results[i].meta.size_bytes = tmp[i].size_bytes;
+        results[i].meta.refcount = tmp[i].refcount;
+        results[i].meta.created_at = tmp[i].created_at;
+        results[i].meta.updated_at = tmp[i].updated_at;
+        copy_cstr(results[i].filename, sizeof(results[i].filename), tmp[i].filename);
+        copy_cstr(results[i].mime_type, sizeof(results[i].mime_type), tmp[i].mime_type);
+        copy_cstr(results[i].origin_path, sizeof(results[i].origin_path), tmp[i].origin_path);
+    }
+
+    *count = found;
+    return ok_status();
 }
 
 Status object_gc(ZoneId zone, u64* objects_deleted) noexcept {
@@ -595,12 +743,214 @@ Status object_verify(const ObjectKey& key, bool* valid) noexcept {
 
     // Update verification timestamp if valid
     if (match) {
-        // TODO: Get current timestamp
-        u64 now = 0;
+        u64 now = static_cast<u64>(std::time(nullptr));
         db::db_object_update_verified_at(g_state.db, key, now);
     }
 
     return ok_status();
+}
+
+// ========================================================================
+// ObjectWriter Implementation
+// ========================================================================
+
+ObjectWriter::ObjectWriter() noexcept {
+    temp_path_[0] = '\0';
+}
+
+ObjectWriter::~ObjectWriter() noexcept {
+    abort();
+}
+
+Status ObjectWriter::open() noexcept {
+    if (fd_ >= 0) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+
+    if (!g_state.initialized) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+
+    // Ensure tmp directory exists
+    char tmp_dir[1024];
+    snprintf(tmp_dir, sizeof(tmp_dir), "%s/tmp", g_state.config.data_root);
+    
+    // Generate temp path
+    snprintf(temp_path_, sizeof(temp_path_), "%s/upload_XXXXXX", tmp_dir);
+    
+    // Ensure directory exists (create_directories creates parent of path)
+    Status s = create_directories(temp_path_);
+    if (!is_ok(s)) {
+        return s;
+    }
+    
+    fd_ = mkstemp(temp_path_);
+    if (fd_ < 0) {
+        return make_status(StatusDomain::Storage, StatusCode::Io, errno);
+    }
+
+    hasher_ = new (std::nothrow) Hasher();
+    if (!hasher_) {
+        close(fd_);
+        unlink(temp_path_);
+        fd_ = -1;
+        return make_status(StatusDomain::Storage, StatusCode::OutOfMemory);
+    }
+
+    total_size_ = 0;
+    return ok_status();
+}
+
+Status ObjectWriter::write(const u8* data, u64 size) noexcept {
+    if (fd_ < 0 || !hasher_) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+
+    if (size == 0) return ok_status();
+
+    // Write to file
+    ssize_t written = 0;
+    while (written < static_cast<ssize_t>(size)) {
+        ssize_t n = ::write(fd_, data + written, size - written);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return make_status(StatusDomain::Storage, StatusCode::Io, errno);
+        }
+        written += n;
+    }
+
+    // Update hash
+    static_cast<Hasher*>(hasher_)->update(BufferView{data, static_cast<u32>(size)});
+    total_size_ += size;
+
+    return ok_status();
+}
+
+Status ObjectWriter::commit(const ObjectPutParams& params, ObjectPutResult* result) noexcept {
+    if (fd_ < 0 || !hasher_) {
+        return make_status(StatusDomain::Storage, StatusCode::Invalid);
+    }
+
+    // Finalize hash
+    Hash256 content_hash;
+    static_cast<Hasher*>(hasher_)->finalize(&content_hash);
+
+    // Sync file
+    if (fsync(fd_) != 0) {
+        return make_status(StatusDomain::Storage, StatusCode::Io, errno);
+    }
+    close(fd_);
+    fd_ = -1; // Closed
+
+    ObjectKey key;
+    key.zone = params.zone;
+    key.content = content_hash;
+
+    // Check if object exists (Deduplication)
+    bool exists = false;
+    Status s = db::db_object_exists(g_state.db, key, &exists);
+    if (!is_ok(s)) {
+        unlink(temp_path_);
+        return s;
+    }
+
+    if (exists) {
+        // Increment refcount
+        s = db::db_object_increment_refcount(g_state.db, key);
+        if (!is_ok(s)) {
+            unlink(temp_path_);
+            return s;
+        }
+
+        // Get metadata
+        db::DbObjectMetadata db_meta;
+        s = db::db_object_get_metadata(g_state.db, key, &db_meta);
+        if (!is_ok(s)) {
+            unlink(temp_path_);
+            return s;
+        }
+
+        // Delete temp file (duplicate)
+        unlink(temp_path_);
+
+        result->key = key;
+        result->meta.size_bytes = db_meta.size_bytes;
+        result->meta.refcount = db_meta.refcount;
+        result->meta.created_at = db_meta.created_at;
+        result->meta.updated_at = db_meta.updated_at;
+        result->deduplicated = true;
+        
+        // Populate filename/mime if provided (for return only, DB not updated on dup)
+        // Or should we update DB with new filename? 
+        // Current logic: deduplication means "same content". 
+        // If we want to store multiple filenames for same content, we need the "files" table.
+        // For now, we just return what's in DB.
+        copy_cstr(result->filename, sizeof(result->filename), db_meta.filename);
+        copy_cstr(result->mime_type, sizeof(result->mime_type), db_meta.mime_type);
+
+        return ok_status();
+    }
+
+    // Move temp file to final location
+    char final_path[1024];
+    construct_fs_path(g_state.config.data_root, params.zone, content_hash, false, final_path, sizeof(final_path));
+
+    s = create_directories(final_path);
+    if (!is_ok(s)) {
+        unlink(temp_path_);
+        return s;
+    }
+
+    if (rename(temp_path_, final_path) != 0) {
+        unlink(temp_path_);
+        return make_status(StatusDomain::Storage, StatusCode::Io, errno);
+    }
+
+    // Ensure permissions are correct (mkstemp uses 0600)
+    chmod(final_path, 0644);
+
+    // Insert into DB
+    db::DbObjectPutMetadataParams db_params{};
+    db_params.key = key;
+    db_params.size_bytes = total_size_;
+    db_params.fs_path = final_path;
+    db_params.filename = params.filename;
+    db_params.mime_type = params.mime_type;
+    db_params.origin_path = params.origin_path;
+
+    s = db::db_object_put_metadata(g_state.db, db_params);
+    if (!is_ok(s)) {
+        unlink(final_path); // Rollback file
+        return s;
+    }
+
+    result->key = key;
+    result->meta.size_bytes = total_size_;
+    result->meta.refcount = 1;
+    result->meta.created_at = 0; // DB sets this
+    result->meta.updated_at = 0;
+    result->deduplicated = false;
+    
+    // We can just copy input filename/mime to result
+    copy_cstr(result->filename, sizeof(result->filename), params.filename);
+    copy_cstr(result->mime_type, sizeof(result->mime_type), params.mime_type);
+
+    return ok_status();
+}
+
+void ObjectWriter::abort() noexcept {
+    if (fd_ >= 0) {
+        close(fd_);
+        fd_ = -1;
+    }
+    if (temp_path_[0] != '\0') {
+        unlink(temp_path_);
+        temp_path_[0] = '\0';
+    }
+    if (hasher_) {
+        delete static_cast<Hasher*>(hasher_);
+        hasher_ = nullptr;
+    }
 }
 
 } // namespace sarc::storage

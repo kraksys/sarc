@@ -11,15 +11,18 @@
 
 init(Req, State) ->
     %% Upgrade to WebSocket
+    io:format("DEBUG: WS init~n"),
     {cowboy_websocket, Req, State}.
 
 websocket_init(State) ->
     %% Start heartbeat timer
+    io:format("DEBUG: WS websocket_init~n"),
     erlang:send_after(?HEARTBEAT_INTERVAL, self(), heartbeat),
     {ok, State}.
 
 websocket_handle({text, Msg}, State) ->
     %% Parse JSON message
+    io:format("DEBUG: WS received: ~p~n", [Msg]),
     try
         Request = jsx:decode(Msg, [return_maps]),
         handle_request(Request, State)
@@ -37,6 +40,14 @@ websocket_handle({binary, _Data}, State) ->
 websocket_handle(_Frame, State) ->
     {ok, State}.
 
+websocket_info({new_object, Key, Meta}, State) ->
+    Response = #{
+        type => new_object,
+        key => sarc_handler_utils:format_key(Key),
+        meta => sarc_handler_utils:format_meta(Meta)
+    },
+    {reply, {text, jsx:encode(Response)}, State};
+
 websocket_info(heartbeat, State) ->
     %% Send ping and schedule next heartbeat
     erlang:send_after(?HEARTBEAT_INTERVAL, self(), heartbeat),
@@ -51,6 +62,12 @@ terminate(_Reason, _Req, _State) ->
 %%====================================================================
 %% Request handling
 %%====================================================================
+
+handle_request(#{<<"action">> := <<"subscribe">>, <<"zone">> := Zone}, State) ->
+    io:format("DEBUG: WS subscribing to zone ~p~n", [Zone]),
+    pg:join(sarc_pubsub, Zone, self()),
+    Response = #{type => result, status => subscribed, zone => Zone},
+    {reply, {text, jsx:encode(Response)}, State};
 
 handle_request(#{<<"action">> := <<"get">>, <<"zone">> := Zone, <<"hash">> := HashHex}, State) ->
     case sarc_handler_utils:parse_zone_and_hash(

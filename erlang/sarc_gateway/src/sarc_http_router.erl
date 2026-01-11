@@ -10,20 +10,20 @@
 routes() ->
     [
         %% Health check endpoint
-        {"/health", sarc_health_handler, []},
+        {"/health", sarc_health_handler, #{}},
 
         %% Object operations
-        {"/objects", sarc_upload_handler, []},                      % PUT
-        {"/objects/:zone/:hash", sarc_object_handler, []},          % GET, DELETE
+        {"/objects", sarc_upload_handler, #{}},                      % PUT
+        {"/objects/:zone/:hash", sarc_object_handler, #{}},          % GET, DELETE
 
         %% Query operations
-        {"/zones/:zone/objects", sarc_query_handler, []},           % GET
+        {"/zones/:zone/objects", sarc_query_handler, #{}},           % GET
 
         %% Garbage collection
-        {"/gc/:zone", sarc_gc_handler, []},                         % POST
+        {"/gc/:zone", sarc_gc_handler, #{}},                         % POST
 
         %% WebSocket endpoint
-        {"/ws", sarc_ws_handler, []}
+        {"/ws", sarc_ws_handler, #{}}
     ].
 
 %%====================================================================

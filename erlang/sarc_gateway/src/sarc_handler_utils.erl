@@ -52,11 +52,13 @@ parse_zone(_) ->
 parse_zone_and_hash(ZoneBin, HashHex) ->
     case parse_zone(ZoneBin) of
         {ok, Zone} ->
-            case sarc_codec:hex_to_hash256(HashHex) of
+            case sarc_codec:hex_to_binary(HashHex) of
                 {ok, Hash} ->
-                    {ok, Zone, Hash};
-                {error, _} ->
-                    {error, invalid_hash}
+                    case sarc_codec:validate_hash256(Hash) of
+                        ok -> {ok, Zone, Hash};
+                        Error -> Error
+                    end;
+                Error -> Error
             end;
         Error ->
             Error
@@ -107,25 +109,51 @@ format_key({Zone, Hash}) ->
     #{
         zone => Zone,
         hash => hash_to_hex(Hash)
-    }.
+    };
+format_key(Map) when is_map(Map) ->
+    Base = #{
+        zone => maps:get(zone, Map),
+        hash => hash_to_hex(maps:get(hash, Map)),
+        size => maps:get(size, Map, 0),
+        created_at => maps:get(created_at, Map, 0)
+    },
+    Base1 = case maps:get(filename, Map, undefined) of
+        undefined -> Base;
+        Filename -> Base#{filename => Filename}
+    end,
+    case maps:get(mime_type, Map, undefined) of
+        undefined -> Base1;
+        Mime -> Base1#{mime_type => Mime}
+    end.
 
 %% Format metadata for JSON
 format_meta(Meta) ->
-    #{
+    Base = #{
         size => maps:get(size, Meta, 0),
         refcount => maps:get(refcount, Meta, 0),
         created_at => maps:get(created_at, Meta, 0),
         updated_at => maps:get(updated_at, Meta, 0)
-    }.
+    },
+    Base1 = case maps:get(filename, Meta, undefined) of
+        undefined -> Base;
+        Filename -> Base#{filename => Filename}
+    end,
+    case maps:get(mime_type, Meta, undefined) of
+        undefined -> Base1;
+        Mime -> Base1#{mime_type => Mime}
+    end.
 
 %% Convert hash binary to hex string
 hash_to_hex(Hash) when is_binary(Hash) ->
-    sarc_codec:hash256_to_hex(Hash).
+    list_to_binary(sarc_codec:binary_to_hex(Hash)).
 
 %% Map error codes to HTTP status codes
 map_error(not_found) -> {404, <<"Not Found">>};
 map_error(invalid) -> {400, <<"Bad Request">>};
+map_error(invalid_handle) -> {400, <<"Bad Request">>};
 map_error(io) -> {500, <<"Internal Server Error">>};
+map_error(io_error) -> {500, <<"Internal Server Error">>};
+map_error(port_died) -> {502, <<"Bad Gateway">>};
 map_error(corrupt) -> {500, <<"Data Corruption">>};
 map_error(permission_denied) -> {403, <<"Forbidden">>};
 map_error(conflict) -> {409, <<"Conflict">>};
@@ -133,7 +161,7 @@ map_error(unavailable) -> {503, <<"Service Unavailable">>};
 map_error(out_of_memory) -> {507, <<"Insufficient Storage">>};
 map_error(_) -> {500, <<"Internal Server Error">>}.
 
-%% Create error response
+%% Create error response (replies immediately)
 error_response(Req, Code, Message) ->
     Body = jsx:encode(#{error => Message}),
     cowboy_req:reply(Code, #{
