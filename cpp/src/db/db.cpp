@@ -13,9 +13,23 @@ using namespace sarc::core;
 
 // Global database state
 namespace {
+    // Prepared statement cache for hot paths
+    struct PreparedStatements {
+        sqlite3_stmt* object_exists = nullptr;
+        sqlite3_stmt* object_get_metadata = nullptr;
+        sqlite3_stmt* object_put_metadata = nullptr;
+        sqlite3_stmt* object_increment_refcount = nullptr;
+        sqlite3_stmt* object_decrement_get_refcount = nullptr;
+        sqlite3_stmt* object_decrement_update = nullptr;
+        sqlite3_stmt* object_gc_query = nullptr;
+        sqlite3_stmt* object_count = nullptr;
+        sqlite3_stmt* object_delete = nullptr;
+    };
+
     struct DbState {
         sqlite3* db = nullptr;
         std::mutex mutex;
+        PreparedStatements stmts;
     };
 
     DbState g_db_state;
@@ -199,6 +213,46 @@ namespace {
             "FROM objects "
             "WHERE rowid NOT IN (SELECT rowid FROM objects_fts);");
     }
+
+    // Finalize all cached prepared statements
+    void finalize_prepared_statements(PreparedStatements& stmts) noexcept {
+        if (stmts.object_exists) {
+            sqlite3_finalize(stmts.object_exists);
+            stmts.object_exists = nullptr;
+        }
+        if (stmts.object_get_metadata) {
+            sqlite3_finalize(stmts.object_get_metadata);
+            stmts.object_get_metadata = nullptr;
+        }
+        if (stmts.object_put_metadata) {
+            sqlite3_finalize(stmts.object_put_metadata);
+            stmts.object_put_metadata = nullptr;
+        }
+        if (stmts.object_increment_refcount) {
+            sqlite3_finalize(stmts.object_increment_refcount);
+            stmts.object_increment_refcount = nullptr;
+        }
+        if (stmts.object_decrement_get_refcount) {
+            sqlite3_finalize(stmts.object_decrement_get_refcount);
+            stmts.object_decrement_get_refcount = nullptr;
+        }
+        if (stmts.object_decrement_update) {
+            sqlite3_finalize(stmts.object_decrement_update);
+            stmts.object_decrement_update = nullptr;
+        }
+        if (stmts.object_gc_query) {
+            sqlite3_finalize(stmts.object_gc_query);
+            stmts.object_gc_query = nullptr;
+        }
+        if (stmts.object_count) {
+            sqlite3_finalize(stmts.object_count);
+            stmts.object_count = nullptr;
+        }
+        if (stmts.object_delete) {
+            sqlite3_finalize(stmts.object_delete);
+            stmts.object_delete = nullptr;
+        }
+    }
 }
 
 // ============================================================================
@@ -268,6 +322,9 @@ Status db_close(DbHandle db) noexcept {
     }
 
     std::lock_guard<std::mutex> lock(g_db_state.mutex);
+
+    // Clean up all prepared statements first
+    finalize_prepared_statements(g_db_state.stmts);
 
     if (g_db_state.db) {
         sqlite3_close(g_db_state.db);
@@ -546,21 +603,26 @@ Status db_object_exists(DbHandle db, const ObjectKey& key, bool* out) noexcept {
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    const char* sql = "SELECT 1 FROM objects WHERE zone_id = ? AND content_hash = ? LIMIT 1";
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare statement on first use
+    if (!g_db_state.stmts.object_exists) {
+        const char* sql = "SELECT 1 FROM objects WHERE zone_id = ? AND content_hash = ? LIMIT 1";
+        int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &g_db_state.stmts.object_exists, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
+
+    sqlite3_stmt* stmt = g_db_state.stmts.object_exists;
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
 
     sqlite3_bind_int(stmt, 1, key.zone.v);
     sqlite3_bind_blob(stmt, 2, key.content.b.data(), 32, SQLITE_STATIC);
 
-    rc = sqlite3_step(stmt);
+    int rc = sqlite3_step(stmt);
     *out = (rc == SQLITE_ROW);
 
-    sqlite3_finalize(stmt);
+    // Don't finalize - just reset for next use
     return ok_status();
 }
 
@@ -575,19 +637,23 @@ Status db_object_delete(DbHandle db, const ObjectKey& key) noexcept {
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    const char* sql = "DELETE FROM objects WHERE zone_id = ? AND content_hash = ?";
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare statement on first use
+    if (!g_db_state.stmts.object_delete) {
+        const char* sql = "DELETE FROM objects WHERE zone_id = ? AND content_hash = ?";
+        int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &g_db_state.stmts.object_delete, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
+
+    sqlite3_stmt* stmt = g_db_state.stmts.object_delete;
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
 
     sqlite3_bind_int(stmt, 1, key.zone.v);
     sqlite3_bind_blob(stmt, 2, key.content.b.data(), 32, SQLITE_STATIC);
 
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    int rc = sqlite3_step(stmt);
 
     if (rc != SQLITE_DONE) {
         return make_status(StatusDomain::Db, StatusCode::Unknown);
@@ -846,15 +912,20 @@ Status db_object_put_metadata(DbHandle db, const DbObjectPutMetadataParams& para
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    const char* sql = "INSERT INTO objects (zone_id, content_hash, size_bytes, refcount, fs_path, verified_at, created_at, updated_at, filename, mime_type, origin_path) "
-                      "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?) "
-                      "ON CONFLICT(zone_id, content_hash) DO UPDATE SET refcount = refcount + 1";
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare statement on first use
+    if (!g_db_state.stmts.object_put_metadata) {
+        const char* sql = "INSERT INTO objects (zone_id, content_hash, size_bytes, refcount, fs_path, verified_at, created_at, updated_at, filename, mime_type, origin_path) "
+                          "VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?) "
+                          "ON CONFLICT(zone_id, content_hash) DO UPDATE SET refcount = refcount + 1";
+        int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &g_db_state.stmts.object_put_metadata, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
+
+    sqlite3_stmt* stmt = g_db_state.stmts.object_put_metadata;
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
 
     Timestamp now = static_cast<Timestamp>(std::time(nullptr));
 
@@ -869,8 +940,7 @@ Status db_object_put_metadata(DbHandle db, const DbObjectPutMetadataParams& para
     sqlite3_bind_text(stmt, 9, params.mime_type ? params.mime_type : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 10, params.origin_path ? params.origin_path : "", -1, SQLITE_STATIC);
 
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    int rc = sqlite3_step(stmt);
 
     if (rc != SQLITE_DONE) {
         return make_status(StatusDomain::Db, StatusCode::Unknown);
@@ -894,19 +964,24 @@ Status db_object_get_metadata(DbHandle db, const ObjectKey& key, DbObjectMetadat
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    const char* sql = "SELECT size_bytes, refcount, fs_path, verified_at, created_at, updated_at, filename, mime_type, origin_path "
-                      "FROM objects WHERE zone_id = ? AND content_hash = ?";
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare statement on first use
+    if (!g_db_state.stmts.object_get_metadata) {
+        const char* sql = "SELECT size_bytes, refcount, fs_path, verified_at, created_at, updated_at, filename, mime_type, origin_path "
+                          "FROM objects WHERE zone_id = ? AND content_hash = ?";
+        int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &g_db_state.stmts.object_get_metadata, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
+
+    sqlite3_stmt* stmt = g_db_state.stmts.object_get_metadata;
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
 
     sqlite3_bind_int(stmt, 1, key.zone.v);
     sqlite3_bind_blob(stmt, 2, key.content.b.data(), 32, SQLITE_STATIC);
 
-    rc = sqlite3_step(stmt);
+    int rc = sqlite3_step(stmt);
 
     if (rc == SQLITE_ROW) {
         metadata->size_bytes = sqlite3_column_int64(stmt, 0);
@@ -948,11 +1023,9 @@ Status db_object_get_metadata(DbHandle db, const ObjectKey& key, DbObjectMetadat
             metadata->origin_path[0] = '\0';
         }
 
-        sqlite3_finalize(stmt);
         return ok_status();
     }
 
-    sqlite3_finalize(stmt);
     return make_status(StatusDomain::Db, StatusCode::NotFound);
 }
 
@@ -967,20 +1040,24 @@ Status db_object_increment_refcount(DbHandle db, const ObjectKey& key) noexcept 
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    const char* sql = "UPDATE objects SET refcount = refcount + 1 "
-                      "WHERE zone_id = ? AND content_hash = ?";
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare statement on first use
+    if (!g_db_state.stmts.object_increment_refcount) {
+        const char* sql = "UPDATE objects SET refcount = refcount + 1 "
+                          "WHERE zone_id = ? AND content_hash = ?";
+        int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &g_db_state.stmts.object_increment_refcount, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
+
+    sqlite3_stmt* stmt = g_db_state.stmts.object_increment_refcount;
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
 
     sqlite3_bind_int(stmt, 1, key.zone.v);
     sqlite3_bind_blob(stmt, 2, key.content.b.data(), 32, SQLITE_STATIC);
 
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    int rc = sqlite3_step(stmt);
 
     if (rc != SQLITE_DONE) {
         return make_status(StatusDomain::Db, StatusCode::Unknown);
@@ -1005,46 +1082,52 @@ Status db_object_decrement_refcount(DbHandle db, const ObjectKey& key, u32* new_
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    // First get current refcount
-    const char* select_sql = "SELECT refcount FROM objects WHERE zone_id = ? AND content_hash = ?";
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db_state.db, select_sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare get refcount statement on first use
+    if (!g_db_state.stmts.object_decrement_get_refcount) {
+        const char* select_sql = "SELECT refcount FROM objects WHERE zone_id = ? AND content_hash = ?";
+        int rc = sqlite3_prepare_v2(g_db_state.db, select_sql, -1, &g_db_state.stmts.object_decrement_get_refcount, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
 
-    sqlite3_bind_int(stmt, 1, key.zone.v);
-    sqlite3_bind_blob(stmt, 2, key.content.b.data(), 32, SQLITE_STATIC);
+    sqlite3_stmt* get_stmt = g_db_state.stmts.object_decrement_get_refcount;
+    sqlite3_reset(get_stmt);
+    sqlite3_clear_bindings(get_stmt);
 
-    rc = sqlite3_step(stmt);
+    sqlite3_bind_int(get_stmt, 1, key.zone.v);
+    sqlite3_bind_blob(get_stmt, 2, key.content.b.data(), 32, SQLITE_STATIC);
+
+    int rc = sqlite3_step(get_stmt);
 
     if (rc != SQLITE_ROW) {
-        sqlite3_finalize(stmt);
         return make_status(StatusDomain::Db, StatusCode::NotFound);
     }
 
-    u32 current_refcount = sqlite3_column_int(stmt, 0);
-    sqlite3_finalize(stmt);
+    u32 current_refcount = sqlite3_column_int(get_stmt, 0);
 
     if (current_refcount == 0) {
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    // Decrement
-    const char* update_sql = "UPDATE objects SET refcount = refcount - 1 "
-                             "WHERE zone_id = ? AND content_hash = ?";
-
-    rc = sqlite3_prepare_v2(g_db_state.db, update_sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare decrement statement on first use
+    if (!g_db_state.stmts.object_decrement_update) {
+        const char* update_sql = "UPDATE objects SET refcount = refcount - 1 "
+                                 "WHERE zone_id = ? AND content_hash = ?";
+        rc = sqlite3_prepare_v2(g_db_state.db, update_sql, -1, &g_db_state.stmts.object_decrement_update, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
 
-    sqlite3_bind_int(stmt, 1, key.zone.v);
-    sqlite3_bind_blob(stmt, 2, key.content.b.data(), 32, SQLITE_STATIC);
+    sqlite3_stmt* update_stmt = g_db_state.stmts.object_decrement_update;
+    sqlite3_reset(update_stmt);
+    sqlite3_clear_bindings(update_stmt);
 
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
+    sqlite3_bind_int(update_stmt, 1, key.zone.v);
+    sqlite3_bind_blob(update_stmt, 2, key.content.b.data(), 32, SQLITE_STATIC);
+
+    rc = sqlite3_step(update_stmt);
 
     if (rc != SQLITE_DONE) {
         return make_status(StatusDomain::Db, StatusCode::Unknown);
@@ -1108,22 +1191,26 @@ Status db_object_gc_query(DbHandle db, ZoneId zone, DbObjectGcEntry* results, u3
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    // Query for objects with refcount=0 in the given zone
-    const char* sql = "SELECT zone_id, content_hash, fs_path FROM objects "
-                      "WHERE zone_id = ? AND refcount = 0 LIMIT ?";
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare statement on first use
+    if (!g_db_state.stmts.object_gc_query) {
+        const char* sql = "SELECT zone_id, content_hash, fs_path FROM objects "
+                          "WHERE zone_id = ? AND refcount = 0 LIMIT ?";
+        int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &g_db_state.stmts.object_gc_query, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
+
+    sqlite3_stmt* stmt = g_db_state.stmts.object_gc_query;
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
 
     sqlite3_bind_int(stmt, 1, zone.v);
     sqlite3_bind_int(stmt, 2, *count);
 
     u32 found = 0;
     while (found < *count) {
-        rc = sqlite3_step(stmt);
+        int rc = sqlite3_step(stmt);
 
         if (rc == SQLITE_ROW) {
             // Extract zone_id
@@ -1148,12 +1235,9 @@ Status db_object_gc_query(DbHandle db, ZoneId zone, DbObjectGcEntry* results, u3
         } else if (rc == SQLITE_DONE) {
             break;  // No more results
         } else {
-            sqlite3_finalize(stmt);
             return make_status(StatusDomain::Db, StatusCode::Unknown);
         }
     }
-
-    sqlite3_finalize(stmt);
 
     *count = found;
     return ok_status();
@@ -1433,22 +1517,26 @@ Status db_object_count(DbHandle db, sarc::core::ZoneId zone, u64* out) noexcept 
         return make_status(StatusDomain::Db, StatusCode::Invalid);
     }
 
-    const char* sql = "SELECT COUNT(*) FROM objects WHERE zone_id = ?";
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK || !stmt) {
-        return make_status(StatusDomain::Db, StatusCode::Unknown);
+    // Prepare statement on first use
+    if (!g_db_state.stmts.object_count) {
+        const char* sql = "SELECT COUNT(*) FROM objects WHERE zone_id = ?";
+        int rc = sqlite3_prepare_v2(g_db_state.db, sql, -1, &g_db_state.stmts.object_count, nullptr);
+        if (rc != SQLITE_OK) {
+            return make_status(StatusDomain::Db, StatusCode::Unknown);
+        }
     }
 
+    sqlite3_stmt* stmt = g_db_state.stmts.object_count;
+    sqlite3_reset(stmt);
+    sqlite3_clear_bindings(stmt);
+
     sqlite3_bind_int(stmt, 1, zone.v);
-    rc = sqlite3_step(stmt);
+    int rc = sqlite3_step(stmt);
     if (rc == SQLITE_ROW) {
         *out = static_cast<u64>(sqlite3_column_int64(stmt, 0));
-        sqlite3_finalize(stmt);
         return ok_status();
     }
 
-    sqlite3_finalize(stmt);
     return make_status(StatusDomain::Db, StatusCode::Unknown);
 }
 
