@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { SarcObject, QueryResult } from './types';
 
 // Proxy redirects /api to http://localhost:8080
 const API_BASE = '/api';
@@ -77,5 +78,51 @@ export const api = {
   triggerGc: async (zone: number) => {
     const res = await axios.post(`${API_BASE}/gc/${zone}`);
     return res.data;
-  }
+  },
+
+  // Search Objects (FTS5 Full-Text Search)
+  searchObjects: async (zone: number, query: string, limit = 100) => {
+    const res = await axios.get(`${API_BASE}/search`, {
+      params: { zone, q: query, limit },
+    });
+    return res.data as QueryResult;
+  },
+
+  // Get Object by Filename
+  getByFilename: async (zone: number, filename: string) => {
+    const res = await axios.get(`${API_BASE}/zones/${zone}/by-filename/${encodeURIComponent(filename)}`);
+    return res.data as SarcObject;
+  },
+
+  // Verify Hash Integrity
+  verifyHash: async (zone: number, hash: string) => {
+    const res = await axios.get(`${API_BASE}/objects/${zone}/${hash}/verify`);
+    return res.data as { valid: boolean; computed_hash: string };
+  },
+
+  // Get Zone Statistics
+  getZoneStats: async (zone: number) => {
+    const res = await axios.get(`${API_BASE}/zones/${zone}/stats`);
+    return res.data as { object_count: number; total_size: number; unique_objects: number };
+  },
+
+  // Batch Delete Objects
+  batchDelete: async (zone: number, hashes: string[]) => {
+    const res = await axios.post(`${API_BASE}/batch/delete`, { zone, hashes });
+    return res.data;
+  },
+
+  // Download Object with Progress
+  downloadObject: async (zone: number, hash: string, onProgress?: (progress: number) => void) => {
+    const res = await axios.get(`${API_BASE}/objects/${zone}/${hash}`, {
+      responseType: 'blob',
+      onDownloadProgress: (progressEvent) => {
+        if (onProgress && progressEvent.total) {
+          const progress = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          onProgress(progress);
+        }
+      },
+    });
+    return res.data;
+  },
 };

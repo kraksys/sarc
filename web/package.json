@@ -9,13 +9,18 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "axios": "*",
+    "clsx": "*",
+    "cmdk": "^1.1.1",
+    "date-fns": "^4.1.0",
+    "file-saver": "^2.0.5",
+    "lucide-react": "*",
     "react": "*",
     "react-dom": "*",
     "react-router-dom": "*",
-    "axios": "*",
-    "clsx": "*",
+    "react-window": "^2.2.5",
     "tailwind-merge": "*",
-    "lucide-react": "*"
+    "zustand": "^5.0.10"
   },
   "devDependencies": {
     "@tailwindcss/vite": "*",
