@@ -12,6 +12,8 @@ export function PreviewModal() {
   useEffect(() => {
     if (!previewObject) return;
 
+    let objectUrl: string | null = null;
+
     const loadPreview = async () => {
       setLoading(true);
       try {
@@ -23,11 +25,11 @@ export function PreviewModal() {
           const text = await blob.text();
           setContent(text);
         } else if (previewObject.mime_type?.startsWith('image/')) {
-          const url = URL.createObjectURL(blob);
-          setContent(url);
+          objectUrl = URL.createObjectURL(blob);
+          setContent(objectUrl);
         } else if (previewObject.mime_type === 'application/pdf') {
-          const url = URL.createObjectURL(blob);
-          setContent(url);
+          objectUrl = URL.createObjectURL(blob);
+          setContent(objectUrl);
         }
       } catch (err) {
         console.error('Preview load error:', err);
@@ -37,6 +39,10 @@ export function PreviewModal() {
     };
 
     loadPreview();
+
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
   }, [previewObject]);
 
   if (!previewObject) return null;

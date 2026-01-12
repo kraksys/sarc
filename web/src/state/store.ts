@@ -15,6 +15,7 @@ interface AppStore {
   // Search state
   searchQuery: string;
   searchResults: SarcObject[];
+  searching: boolean;
 
   // Upload state
   uploads: UploadTask[];
@@ -43,6 +44,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   loadingObjects: false,
   searchQuery: "",
   searchResults: [],
+  searching: false,
   uploads: [],
   status: "",
 
@@ -113,10 +115,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setSearchQuery: async (query) => {
     set({ searchQuery: query });
     if (!query) {
-      set({ searchResults: [] });
+      set({ searchResults: [], searching: false });
       return;
     }
 
+    set({ searching: true, searchResults: [] });
     try {
       // Try FTS5 backend search first
       const data = await api.searchObjects(get().currentZone, query);
@@ -131,6 +134,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
           obj.mime_type?.toLowerCase().includes(query.toLowerCase()),
       );
       set({ searchResults: results });
+    } finally {
+      set({ searching: false });
     }
   },
 

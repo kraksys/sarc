@@ -1,4 +1,4 @@
-import { Download, Trash2, Shield, FileIcon, Eye } from 'lucide-react';
+import { FileIcon } from 'lucide-react';
 import { useAppStore } from '../state/store';
 import { useUIStore } from '../state/ui-store';
 import { api } from '../api';
@@ -6,21 +6,36 @@ import type { SarcObject } from '../types';
 
 export function ObjectList() {
   const objects = useAppStore(state => state.objects);
+  const searchQuery = useAppStore(state => state.searchQuery);
   const searchResults = useAppStore(state => state.searchResults);
+  const searching = useAppStore(state => state.searching);
   const selectedObjects = useAppStore(state => state.selectedObjects);
   const toggleSelectObject = useAppStore(state => state.toggleSelectObject);
   const showSecurityModal = useUIStore(state => state.showSecurityModal);
   const showPreview = useUIStore(state => state.showPreview);
 
-  // Display search results if available
-  const displayObjects = searchResults.length > 0 ? searchResults : objects;
+  const displayObjects = searchQuery ? searchResults : objects;
 
   if (displayObjects.length === 0) {
     return (
       <div className="p-16 text-center">
         <FileIcon className="w-8 h-8 mx-auto mb-4" />
-        <p className="font-medium">NO OBJECTS FOUND</p>
-        <p className="text-sm mt-2">PRESS [U] TO UPLOAD FILES</p>
+        {searching ? (
+          <>
+            <p className="font-medium">SEARCHING...</p>
+            <p className="text-sm mt-2">PRESS [ESC] TO CANCEL</p>
+          </>
+        ) : searchQuery ? (
+          <>
+            <p className="font-medium">NO MATCHES</p>
+            <p className="text-sm mt-2">PRESS [ESC] TO CLEAR SEARCH</p>
+          </>
+        ) : (
+          <>
+            <p className="font-medium">NO OBJECTS FOUND</p>
+            <p className="text-sm mt-2">PRESS [U] TO UPLOAD FILES</p>
+          </>
+        )}
       </div>
     );
   }
@@ -53,6 +68,9 @@ interface ObjectRowProps {
 
 function ObjectRow({ object, rid, selected, onToggleSelect, onShowSecurity, onPreview }: ObjectRowProps) {
   const deleteObjects = useAppStore(state => state.deleteObjects);
+  const borderColor = selected ? 'border-black' : 'border-white';
+  const dimText = selected ? 'text-black' : 'text-gray-400';
+  const mainText = selected ? 'text-black' : 'text-white';
 
   const handleDelete = async () => {
     if (!confirm(`Delete "${object.filename || object.hash.substring(0, 12)}"?`)) return;
@@ -76,27 +94,28 @@ function ObjectRow({ object, rid, selected, onToggleSelect, onShowSecurity, onPr
 
   return (
     <div
-      className={`grid grid-cols-12 gap-4 p-2 items-center border-b border-white hover:bg-gray-800 ${
-        selected ? 'bg-white text-black' : ''
+      data-object-hash={object.hash}
+      className={`grid grid-cols-12 gap-4 p-2 items-center border-b ${borderColor} ${
+        selected ? 'vintage-invert' : 'hover:bg-gray-800'
       }`}
     >
       {/* RID */}
-      <div className="col-span-1 text-center font-mono">
+      <div className={`col-span-1 text-center font-mono ${mainText}`}>
         {rid.toString().padStart(3, '0')}
       </div>
 
       {/* Filename / Hash */}
-      <div className="col-span-4 font-mono text-xs text-gray-600 truncate select-all" title={object.hash}>
+      <div className={`col-span-4 font-mono text-xs truncate select-all ${mainText}`} title={object.hash}>
         {object.filename || object.hash}
       </div>
 
       {/* Size */}
-      <div className="col-span-2 text-xs text-gray-500">
+      <div className={`col-span-2 text-xs ${dimText}`}>
         {formatSize(object.size)}
       </div>
 
       {/* MIME Type */}
-      <div className="col-span-2 text-xs text-gray-500 truncate" title={object.mime_type}>
+      <div className={`col-span-2 text-xs truncate ${dimText}`} title={object.mime_type}>
         {object.mime_type || 'blob'}
       </div>
 
@@ -105,7 +124,7 @@ function ObjectRow({ object, rid, selected, onToggleSelect, onShowSecurity, onPr
         {isPreviewable(object.mime_type) && (
           <button
             onClick={onPreview}
-            className="px-2 py-1 border border-white hover:bg-white hover:text-black"
+            className={`px-2 py-1 border ${borderColor} vintage-outline`}
             title="Preview"
           >
             VIEW
@@ -113,7 +132,7 @@ function ObjectRow({ object, rid, selected, onToggleSelect, onShowSecurity, onPr
         )}
         <button
           onClick={onShowSecurity}
-          className="px-2 py-1 border border-white hover:bg-white hover:text-black"
+          className={`px-2 py-1 border ${borderColor} vintage-outline`}
           title="Security Info"
         >
           SEC
@@ -121,21 +140,21 @@ function ObjectRow({ object, rid, selected, onToggleSelect, onShowSecurity, onPr
         <a
           href={api.getObjectUrl(object.zone, object.hash)}
           download={object.filename}
-          className="px-2 py-1 border border-white hover:bg-white hover:text-black"
+          className={`px-2 py-1 border ${borderColor} vintage-outline`}
           title="Download"
         >
           DL
         </a>
         <button
           onClick={handleDelete}
-          className="px-2 py-1 border border-white hover:bg-white hover:text-black"
+          className={`px-2 py-1 border ${borderColor} vintage-outline`}
           title="Delete"
         >
           DEL
         </button>
         <button
           onClick={onToggleSelect}
-          className={`px-2 py-1 border border-white ${selected ? 'bg-black text-white' : 'hover:bg-white hover:text-black'}`}
+          className={`px-2 py-1 border ${borderColor} ${selected ? 'bg-black text-white' : 'vintage-outline'}`}
           title="Select/Unselect"
         >
           [X]

@@ -1,7 +1,7 @@
 import { Command } from 'cmdk';
 import { useUIStore } from '../state/ui-store';
 import { useAppStore } from '../state/store';
-import { Upload, Search, Trash2, RefreshCw, Download } from 'lucide-react';
+import { Upload, Trash2, RefreshCw, Download } from 'lucide-react';
 import { api } from '../api';
 
 export function CommandPalette() {

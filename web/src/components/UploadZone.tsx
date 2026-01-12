@@ -174,7 +174,7 @@ export function UploadZone() {
       onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
       onDragLeave={() => setDragOver(false)}
       className={`border-2 border-dashed rounded-lg p-8 text-center transition ${
-        dragOver ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'
+        dragOver ? 'border-white bg-gray-900' : 'border-gray-300 hover:border-white'
       } ${uploading ? 'opacity-50 pointer-events-none' : ''}`}
     >
       <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
@@ -182,7 +182,7 @@ export function UploadZone() {
       {uploading && progress ? (
         // Upload progress display
         <div className="space-y-4">
-          <div className="flex items-center justify-center gap-2 text-blue-600">
+          <div className="flex items-center justify-center gap-2 text-white">
             <FileCheck className="w-5 h-5 animate-pulse" />
             <p className="text-gray-600 font-medium">
               Uploading {progress.current} of {progress.total} files...
@@ -191,8 +191,11 @@ export function UploadZone() {
 
           <div className="w-full bg-gray-200 rounded-full h-2.5">
             <div
-              className="bg-blue-600 h-2.5 rounded-full transition-all duration-300"
-              style={{ width: `${(progress.current / progress.total) * 100}%` }}
+              className="h-2.5 rounded-full transition-all duration-300"
+              style={{
+                width: `${(progress.current / progress.total) * 100}%`,
+                backgroundColor: '#ffffff',
+              }}
             ></div>
           </div>
 
@@ -215,7 +218,7 @@ export function UploadZone() {
           </p>
 
           <div className="flex gap-3 justify-center">
-            <label className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg cursor-pointer hover:bg-blue-700 transition">
+            <label className="inline-flex items-center gap-2 px-4 py-2 border-2 border-white vintage-invert cursor-pointer transition">
               <Upload className="w-4 h-4" />
               Select Files
               <input
@@ -227,7 +230,7 @@ export function UploadZone() {
               />
             </label>
 
-            <label className="inline-flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg cursor-pointer hover:bg-purple-700 transition">
+            <label className="inline-flex items-center gap-2 px-4 py-2 border-2 border-white vintage-outline cursor-pointer transition">
               <Folder className="w-4 h-4" />
               Select Folder
               <input

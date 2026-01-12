@@ -280,6 +280,27 @@ textarea::placeholder {
   z-index: 1000;
 }
 
+/* Vintage utilities (avoid Tailwind color overrides) */
+.vintage-outline {
+  background-color: #000000 !important;
+  color: #ffffff !important;
+}
+
+.vintage-outline:hover {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+}
+
+.vintage-invert {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+}
+
+.vintage-invert:hover {
+  background-color: #cccccc !important;
+  color: #000000 !important;
+}
+
 /* Blinking cursor effect */
 @keyframes blink {
   0%, 50% { opacity: 1; }
@@ -302,6 +323,6 @@ textarea::placeholder {
   color: #000000;
   padding: 0.25rem 1rem;
   font-size: 0.75rem;
-  border-top: 2px solid #ffffff;
-  z-index: 100;
+  border-top: 2px solid #000000;
+  z-index: 10;
 }

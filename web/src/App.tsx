@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { HardDrive, RefreshCw, Trash2, Upload as UploadIcon } from 'lucide-react';
+import { HardDrive, RefreshCw, Trash2 } from 'lucide-react';
 import { useAppStore } from './state/store';
 import { useUIStore } from './state/ui-store';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -27,6 +27,7 @@ function App() {
   const selectedObjects = useAppStore(state => state.selectedObjects);
   const setStatus = useAppStore(state => state.setStatus);
   const setSearchQuery = useAppStore(state => state.setSearchQuery);
+  const searchQuery = useAppStore(state => state.searchQuery);
   const objects = useAppStore(state => state.objects);
   const searchResults = useAppStore(state => state.searchResults);
   const openUploadModal = useUIStore(state => state.openUploadModal);
@@ -134,6 +135,14 @@ function App() {
   };
 
   const handleVimCommand = async (command: string) => {
+    const scrollToObject = (hash: string) => {
+      requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>(`[data-object-hash="${hash}"]`)
+          ?.scrollIntoView({ block: 'center' });
+      });
+    };
+
     if (vimMode === 'search') {
       // FTS5 Search
       await setSearchQuery(command);
@@ -144,9 +153,10 @@ function App() {
         // Find by RID (1-indexed)
         const obj = objects[rid - 1];
         if (obj) {
-          const toggleSelectObject = useAppStore.getState().toggleSelectObject;
-          toggleSelectObject(obj.hash);
+          const selectObject = useAppStore.getState().selectObject;
+          selectObject(obj.hash);
           setStatus(`Selected: ${obj.filename || obj.hash.substring(0, 12)}`);
+          scrollToObject(obj.hash);
         }
       } else if (command.length === 1) {
         // Find by first letter
@@ -157,6 +167,7 @@ function App() {
           const selectObject = useAppStore.getState().selectObject;
           selectObject(matches[0].hash);
           setStatus(`Found ${matches.length} match(es) starting with '${command}'`);
+          scrollToObject(matches[0].hash);
         } else {
           setStatus(`No files starting with '${command}'`);
         }
@@ -167,11 +178,13 @@ function App() {
 
   const handleVimEscape = () => {
     setVimMode('normal');
-    setSearchQuery('');
+    if (vimMode === 'search') {
+      setSearchQuery('');
+    }
   };
 
   // Display search results if searching
-  const displayedObjects = searchResults.length > 0 ? searchResults : objects;
+  const displayedObjects = searchQuery ? searchResults : objects;
 
   return (
     <div className="min-h-screen p-8 max-w-7xl mx-auto font-mono pb-24">
@@ -211,7 +224,7 @@ function App() {
       <div className="flex gap-2 mb-6 border-2 border-white p-2">
         <button
           onClick={openUploadModal}
-          className="px-4 py-2 bg-white text-black border-2 border-black hover:bg-gray-200"
+          className="px-4 py-2 border-2 border-white vintage-invert"
           title="Press 'u' to upload"
         >
           [U]PLOAD
@@ -282,7 +295,7 @@ function App() {
           <div className="border-4 border-white p-6 max-w-2xl w-full m-4 bg-black">
             <div className="flex justify-between items-center mb-4 pb-2 border-b-2 border-white">
               <h3 className="text-lg tracking-widest">UPLOAD FILES</h3>
-              <button onClick={closeUploadModal} className="text-2xl hover:bg-white hover:text-black px-2">
+              <button onClick={closeUploadModal} className="text-2xl px-2 border border-white vintage-outline">
                 [X]
               </button>
             </div>
@@ -311,9 +324,11 @@ function App() {
       />
 
       {/* Status Bar at bottom */}
-      <div className="status-bar">
-        SARC v1.0 | ZONE {currentZone} | MODE: {vimMode.toUpperCase()} | OBJECTS: {displayedObjects.length}
-      </div>
+      {vimMode === 'normal' && (
+        <div className="status-bar">
+          SARC v1.0 | ZONE {currentZone} | MODE: {vimMode.toUpperCase()} | OBJECTS: {displayedObjects.length}
+        </div>
+      )}
     </div>
   );
 }

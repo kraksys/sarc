@@ -1,35 +1,8 @@
 import axios from 'axios';
-import type { SarcObject, QueryResult } from './types';
+import type { QueryResult, SarcObject, UploadResult, ZoneStats } from './types';
 
 // Proxy redirects /api to http://localhost:8080
 const API_BASE = '/api';
-
-export interface SarcObject {
-  zone: number;
-  hash: string;
-  size?: number;
-  created_at?: number;
-  filename?: string;
-  mime_type?: string;
-}
-
-export interface ObjectMeta {
-  size: number;
-  refcount: number;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface UploadResult {
-  key: SarcObject;
-  meta: ObjectMeta;
-  deduplicated: boolean;
-}
-
-export interface QueryResult {
-  results: SarcObject[];
-  count: number;
-}
 
 export const api = {
   // Health Check
@@ -103,7 +76,7 @@ export const api = {
   // Get Zone Statistics
   getZoneStats: async (zone: number) => {
     const res = await axios.get(`${API_BASE}/zones/${zone}/stats`);
-    return res.data as { object_count: number; total_size: number; unique_objects: number };
+    return res.data as ZoneStats;
   },
 
   // Batch Delete Objects
