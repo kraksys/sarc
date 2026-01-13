@@ -1,4 +1,5 @@
 import { FileIcon } from 'lucide-react';
+import { saveAs } from 'file-saver';
 import { useAppStore } from '../state/store';
 import { useUIStore } from '../state/ui-store';
 import { api } from '../api';
@@ -11,7 +12,6 @@ export function ObjectList() {
   const searching = useAppStore(state => state.searching);
   const selectedObjects = useAppStore(state => state.selectedObjects);
   const toggleSelectObject = useAppStore(state => state.toggleSelectObject);
-  const showSecurityModal = useUIStore(state => state.showSecurityModal);
   const showPreview = useUIStore(state => state.showPreview);
 
   const displayObjects = searchQuery ? searchResults : objects;
@@ -49,7 +49,6 @@ export function ObjectList() {
           rid={index + 1}
           selected={selectedObjects.has(obj.hash)}
           onToggleSelect={() => toggleSelectObject(obj.hash)}
-          onShowSecurity={() => showSecurityModal(obj)}
           onPreview={() => showPreview(obj)}
         />
       ))}
@@ -62,12 +61,12 @@ interface ObjectRowProps {
   rid: number;
   selected: boolean;
   onToggleSelect: () => void;
-  onShowSecurity: () => void;
   onPreview: () => void;
 }
 
-function ObjectRow({ object, rid, selected, onToggleSelect, onShowSecurity, onPreview }: ObjectRowProps) {
+function ObjectRow({ object, rid, selected, onToggleSelect, onPreview }: ObjectRowProps) {
   const deleteObjects = useAppStore(state => state.deleteObjects);
+  const setStatus = useAppStore(state => state.setStatus);
   const borderColor = selected ? 'border-black' : 'border-white';
   const dimText = selected ? 'text-black' : 'text-gray-400';
   const mainText = selected ? 'text-black' : 'text-white';
@@ -75,6 +74,17 @@ function ObjectRow({ object, rid, selected, onToggleSelect, onShowSecurity, onPr
   const handleDelete = async () => {
     if (!confirm(`Delete "${object.filename || object.hash.substring(0, 12)}"?`)) return;
     await deleteObjects([object.hash]);
+  };
+
+  const handleDownload = async () => {
+    try {
+      const blob = await api.downloadObject(object.zone, object.hash);
+      saveAs(blob, object.filename || `${object.hash.substring(0, 12)}.bin`);
+      setStatus(`Downloaded: ${object.filename || object.hash.substring(0, 12)}`);
+    } catch (err) {
+      console.error('Download error:', err);
+      setStatus('Download failed');
+    }
   };
 
   const formatSize = (bytes?: number) => {
@@ -131,20 +141,12 @@ function ObjectRow({ object, rid, selected, onToggleSelect, onShowSecurity, onPr
           </button>
         )}
         <button
-          onClick={onShowSecurity}
-          className={`px-2 py-1 border ${borderColor} vintage-outline`}
-          title="Security Info"
-        >
-          SEC
-        </button>
-        <a
-          href={api.getObjectUrl(object.zone, object.hash)}
-          download={object.filename}
+          onClick={handleDownload}
           className={`px-2 py-1 border ${borderColor} vintage-outline`}
           title="Download"
         >
           DL
-        </a>
+        </button>
         <button
           onClick={handleDelete}
           className={`px-2 py-1 border ${borderColor} vintage-outline`}

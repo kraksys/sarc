@@ -2,6 +2,7 @@ import { Command } from 'cmdk';
 import { useUIStore } from '../state/ui-store';
 import { useAppStore } from '../state/store';
 import { Upload, Trash2, RefreshCw, Download } from 'lucide-react';
+import { saveAs } from 'file-saver';
 import { api } from '../api';
 
 export function CommandPalette() {
@@ -34,7 +35,14 @@ export function CommandPalette() {
         if (hash) {
           const obj = objects.find(o => o.hash === hash);
           if (obj) {
-            window.open(api.getObjectUrl(currentZone, hash), '_blank');
+            try {
+              const blob = await api.downloadObject(currentZone, hash);
+              saveAs(blob, obj.filename || `${obj.hash.substring(0, 12)}.bin`);
+              setStatus(`Downloaded: ${obj.filename || obj.hash.substring(0, 12)}`);
+            } catch (err) {
+              console.error('Download error:', err);
+              setStatus('Download failed');
+            }
           }
         }
         break;

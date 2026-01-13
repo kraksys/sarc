@@ -2,6 +2,7 @@ import { X, Download } from 'lucide-react';
 import { useUIStore } from '../state/ui-store';
 import { api } from '../api';
 import { useState, useEffect } from 'react';
+import { saveAs } from 'file-saver';
 
 export function PreviewModal() {
   const previewObject = useUIStore(state => state.previewObject);
@@ -47,6 +48,15 @@ export function PreviewModal() {
 
   if (!previewObject) return null;
 
+  const handleDownload = async () => {
+    try {
+      const blob = await api.downloadObject(previewObject.zone, previewObject.hash);
+      saveAs(blob, previewObject.filename || `${previewObject.hash.substring(0, 12)}.bin`);
+    } catch (err) {
+      console.error('Download error:', err);
+    }
+  };
+
   const renderPreview = () => {
     if (loading) return <div className="text-center py-8">Loading preview...</div>;
     if (!content) return <div className="text-center py-8 text-gray-500">Preview not available</div>;
@@ -80,14 +90,13 @@ export function PreviewModal() {
             <p className="text-sm text-gray-500">{previewObject.mime_type}</p>
           </div>
           <div className="flex gap-2">
-            <a
-              href={api.getObjectUrl(previewObject.zone, previewObject.hash)}
-              download={previewObject.filename}
+            <button
+              onClick={handleDownload}
               className="p-2 text-blue-600 hover:bg-blue-50 rounded-md transition"
               title="Download"
             >
               <Download className="w-5 h-5" />
-            </a>
+            </button>
             <button onClick={closePreview} className="p-2 text-gray-400 hover:text-gray-600">
               <X className="w-5 h-5" />
             </button>

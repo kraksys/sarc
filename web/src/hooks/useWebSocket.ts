@@ -1,6 +1,12 @@
 import { useEffect, useRef } from 'react';
 import { useAppStore } from '../state/store';
 import { SarcObject } from '../types';
+import { signWsPayload } from '../remote';
+
+function getWsUrl() {
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${proto}://${window.location.host}/ws`;
+}
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
@@ -9,13 +15,18 @@ export function useWebSocket() {
   const setStatus = useAppStore(state => state.setStatus);
 
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8080/ws');
+    const ws = new WebSocket(getWsUrl());
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      console.log('WebSocket connected');
-      ws.send(JSON.stringify({ action: 'subscribe', zone: currentZone }));
-      setStatus('Connected');
+    ws.onopen = async () => {
+      try {
+        const payload = await signWsPayload({ action: 'subscribe', zone: currentZone });
+        ws.send(JSON.stringify(payload));
+        setStatus('Connected');
+      } catch (err) {
+        console.error('WS auth error:', err);
+        setStatus('WS auth failed');
+      }
     };
 
     ws.onmessage = (event) => {
@@ -41,6 +52,8 @@ export function useWebSocket() {
           useAppStore.setState({
             objects: objects.filter(obj => obj.hash !== msg.hash)
           });
+        } else if (msg.type === 'error') {
+          setStatus(`WS error: ${msg.reason}`);
         }
       } catch (e) {
         console.error('WS parse error', e);
@@ -53,7 +66,6 @@ export function useWebSocket() {
     };
 
     ws.onclose = () => {
-      console.log('WebSocket disconnected');
       setStatus('Disconnected');
     };
 

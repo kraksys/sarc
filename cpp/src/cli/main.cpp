@@ -3,11 +3,13 @@
 #include <cstring>
 #include <csignal>
 #include <vector>
+#include <array>
 #include <string>
 #include <set>
 #include <map>
 #include <regex>
 #include <filesystem>
+#include <fstream>
 #include <algorithm>
 #include <chrono>
 #include <cctype>
@@ -16,6 +18,12 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+#if defined(SARC_HAVE_LIBSODIUM)
+#include <sodium.h>
+#endif
+#if defined(SARC_HAVE_LIBCURL)
+#include <curl/curl.h>
+#endif
 #include "sarc/cli/commands.hpp"
 #include "sarc/cli/options.hpp"
 #include "sarc/storage/object_store.hpp"
@@ -38,6 +46,8 @@ struct CliConfig {
     std::string db_path;
     std::string views_root;
     sarc::core::ZoneId zone{1};  // Default to zone 1 (zone 0 is reserved for cross-zone queries)
+    bool remote_enabled{false};
+    std::string remote_url;
 };
 
 // ========================================================================
@@ -183,6 +193,481 @@ static bool parse_hash256_hex(const char* hash_str, sarc::core::Hash256* out) {
     *out = h;
     return true;
 }
+
+// ========================================================================
+// Remote Support (per-request signatures)
+// ========================================================================
+
+struct DeviceKeys {
+    std::array<unsigned char, 32> pub{};
+    std::array<unsigned char, 64> priv{};
+    bool loaded{false};
+};
+
+static std::string get_home_dir() {
+    const char* home = std::getenv("HOME");
+    return home ? std::string(home) : std::string("/tmp");
+}
+
+static std::string get_sarc_home_dir() {
+    return get_home_dir() + "/.sarc";
+}
+
+static std::string device_key_path() {
+    return get_sarc_home_dir() + "/device.key";
+}
+
+static std::string remote_config_path() {
+    return get_sarc_home_dir() + "/remote.conf";
+}
+
+static bool ensure_dir_exists(const std::string& path) {
+    std::error_code ec;
+    std::filesystem::create_directories(path, ec);
+    return !ec;
+}
+
+static bool hex_decode_bytes(const std::string& hex, unsigned char* out, size_t out_len) {
+    if (hex.size() != out_len * 2) return false;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < out_len; ++i) {
+        int hi = nibble(hex[i * 2]);
+        int lo = nibble(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = static_cast<unsigned char>((hi << 4) | lo);
+    }
+    return true;
+}
+
+static std::string hex_encode_bytes(const unsigned char* data, size_t len) {
+    static const char kHex[] = "0123456789abcdef";
+    std::string out;
+    out.resize(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        out[i * 2] = kHex[(data[i] >> 4) & 0x0f];
+        out[i * 2 + 1] = kHex[data[i] & 0x0f];
+    }
+    return out;
+}
+
+#if defined(SARC_HAVE_LIBSODIUM)
+static bool ensure_sodium() {
+    return sodium_init() >= 0;
+}
+
+static bool base64_encode(const unsigned char* data, size_t len, std::string* out) {
+    if (!out) return false;
+    const size_t need = sodium_base64_ENCODED_LEN(len, sodium_base64_VARIANT_ORIGINAL);
+    out->assign(need, '\0');
+    sodium_bin2base64(out->data(), out->size(), data, len, sodium_base64_VARIANT_ORIGINAL);
+    if (!out->empty() && out->back() == '\0') out->pop_back();
+    return true;
+}
+
+static std::string sha256_hex(const unsigned char* data, size_t len) {
+    unsigned char hash[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(hash, data, len);
+    return hex_encode_bytes(hash, sizeof(hash));
+}
+
+static std::string random_nonce_hex() {
+    unsigned char buf[16];
+    randombytes_buf(buf, sizeof(buf));
+    return hex_encode_bytes(buf, sizeof(buf));
+}
+#endif
+
+static bool load_device_keys(DeviceKeys* keys) {
+    if (!keys) return false;
+    std::ifstream in(device_key_path());
+    if (!in.is_open()) return false;
+    std::string line;
+    std::string pub_hex;
+    std::string priv_hex;
+    while (std::getline(in, line)) {
+        if (line.rfind("pub=", 0) == 0) pub_hex = line.substr(4);
+        if (line.rfind("priv=", 0) == 0) priv_hex = line.substr(5);
+    }
+    if (pub_hex.empty() || priv_hex.empty()) return false;
+    if (!hex_decode_bytes(pub_hex, keys->pub.data(), keys->pub.size())) return false;
+    if (!hex_decode_bytes(priv_hex, keys->priv.data(), keys->priv.size())) return false;
+    keys->loaded = true;
+    return true;
+}
+
+static bool save_device_keys(const DeviceKeys& keys) {
+    if (!ensure_dir_exists(get_sarc_home_dir())) return false;
+    std::ofstream out(device_key_path(), std::ios::trunc);
+    if (!out.is_open()) return false;
+    out << "pub=" << hex_encode_bytes(keys.pub.data(), keys.pub.size()) << "\n";
+    out << "priv=" << hex_encode_bytes(keys.priv.data(), keys.priv.size()) << "\n";
+    return true;
+}
+
+static bool ensure_device_keys(DeviceKeys* keys) {
+    if (load_device_keys(keys)) return true;
+#if defined(SARC_HAVE_LIBSODIUM)
+    if (!ensure_sodium()) return false;
+    DeviceKeys k;
+    crypto_sign_keypair(k.pub.data(), k.priv.data());
+    k.loaded = true;
+    if (!save_device_keys(k)) return false;
+    *keys = k;
+    return true;
+#else
+    (void)keys;
+    return false;
+#endif
+}
+
+static void load_remote_config(CliConfig& cfg) {
+    std::ifstream in(remote_config_path());
+    if (!in.is_open()) return;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.rfind("enabled=", 0) == 0) {
+            cfg.remote_enabled = (line.substr(8) == "1");
+        } else if (line.rfind("url=", 0) == 0) {
+            cfg.remote_url = line.substr(4);
+        }
+    }
+}
+
+static void save_remote_config(const CliConfig& cfg) {
+    if (!ensure_dir_exists(get_sarc_home_dir())) return;
+    std::ofstream out(remote_config_path(), std::ios::trunc);
+    if (!out.is_open()) return;
+    out << "enabled=" << (cfg.remote_enabled ? "1" : "0") << "\n";
+    out << "url=" << cfg.remote_url << "\n";
+}
+
+#if defined(SARC_HAVE_LIBCURL)
+struct HttpResponse {
+    long status{0};
+    std::string body;
+};
+
+static size_t curl_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* out = static_cast<std::string*>(userdata);
+    out->append(ptr, size * nmemb);
+    return size * nmemb;
+}
+
+static bool http_request(const std::string& method,
+                         const std::string& url,
+                         const std::vector<std::string>& headers,
+                         const std::string& body,
+                         HttpResponse* out) {
+    if (!out) return false;
+    CURL* curl = curl_easy_init();
+    if (!curl) return false;
+
+    struct curl_slist* header_list = nullptr;
+    for (const auto& h : headers) {
+        header_list = curl_slist_append(header_list, h.c_str());
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "sarc_cli/remote");
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out->body);
+
+    if (!body.empty()) {
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.data());
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+    }
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &out->status);
+    curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+    return res == CURLE_OK;
+}
+
+static bool http_download(const std::string& method,
+                          const std::string& url,
+                          const std::vector<std::string>& headers,
+                          const std::string& out_path,
+                          long* status_out) {
+    FILE* f = std::fopen(out_path.c_str(), "wb");
+    if (!f) return false;
+
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        std::fclose(f);
+        return false;
+    }
+
+    struct curl_slist* header_list = nullptr;
+    for (const auto& h : headers) {
+        header_list = curl_slist_append(header_list, h.c_str());
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, method.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "sarc_cli/remote");
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, f);
+
+    CURLcode res = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    if (status_out) *status_out = status;
+
+    curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+    std::fclose(f);
+    return res == CURLE_OK;
+}
+#endif
+
+static std::string join_url(const std::string& base, const std::string& path) {
+    if (base.empty()) return path;
+    if (base.back() == '/' && !path.empty() && path.front() == '/') {
+        return base.substr(0, base.size() - 1) + path;
+    }
+    if (base.back() != '/' && !path.empty() && path.front() != '/') {
+        return base + "/" + path;
+    }
+    return base + path;
+}
+
+static bool build_auth_headers(const DeviceKeys& keys,
+                               const std::string& method,
+                               const std::string& path_query,
+                               const std::string& body,
+                               std::vector<std::string>* headers_out) {
+#if defined(SARC_HAVE_LIBSODIUM)
+    if (!headers_out) return false;
+    if (!ensure_sodium()) return false;
+
+    const std::string body_hash = sha256_hex(reinterpret_cast<const unsigned char*>(body.data()), body.size());
+    const std::string ts = std::to_string(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    const std::string nonce = random_nonce_hex();
+
+    std::string canonical = method + "\n" + path_query + "\n" + body_hash + "\n" + ts + "\n" + nonce;
+
+    unsigned char sig[crypto_sign_BYTES];
+    crypto_sign_detached(sig, nullptr,
+                         reinterpret_cast<const unsigned char*>(canonical.data()),
+                         canonical.size(),
+                         keys.priv.data());
+
+    std::string pub_b64;
+    std::string sig_b64;
+    base64_encode(keys.pub.data(), keys.pub.size(), &pub_b64);
+    base64_encode(sig, sizeof(sig), &sig_b64);
+
+    headers_out->push_back("X-SARC-PUB: " + pub_b64);
+    headers_out->push_back("X-SARC-SIG: " + sig_b64);
+    headers_out->push_back("X-SARC-TS: " + ts);
+    headers_out->push_back("X-SARC-NONCE: " + nonce);
+    return true;
+#else
+    (void)keys;
+    (void)method;
+    (void)path_query;
+    (void)body;
+    (void)headers_out;
+    return false;
+#endif
+}
+
+static bool remote_available() {
+#if defined(SARC_HAVE_LIBSODIUM) && defined(SARC_HAVE_LIBCURL)
+    return true;
+#else
+    return false;
+#endif
+}
+
+struct RemoteObject {
+    sarc::core::u32 zone{0};
+    std::string hash;
+    std::string filename;
+    std::string mime;
+    sarc::core::u64 size{0};
+};
+
+static void split_tabs(const std::string& line, std::vector<std::string>* out) {
+    out->clear();
+    size_t start = 0;
+    while (start <= line.size()) {
+        size_t pos = line.find('\t', start);
+        if (pos == std::string::npos) {
+            out->push_back(line.substr(start));
+            break;
+        }
+        out->push_back(line.substr(start, pos - start));
+        start = pos + 1;
+    }
+}
+
+static bool parse_remote_list_body(const std::string& body, std::vector<RemoteObject>* out) {
+    if (!out) return false;
+    out->clear();
+    std::string line;
+    std::vector<std::string> cols;
+    for (size_t i = 0; i < body.size(); ++i) {
+        char c = body[i];
+        if (c == '\n' || c == '\r') {
+            if (!line.empty()) {
+                split_tabs(line, &cols);
+                if (cols.size() >= 6) {
+                    RemoteObject obj;
+                    obj.zone = static_cast<sarc::core::u32>(std::strtoul(cols[1].c_str(), nullptr, 10));
+                    obj.hash = cols[2];
+                    obj.size = static_cast<sarc::core::u64>(std::strtoull(cols[3].c_str(), nullptr, 10));
+                    obj.filename = cols[4];
+                    obj.mime = cols[5];
+                    out->push_back(std::move(obj));
+                }
+                line.clear();
+            }
+            continue;
+        }
+        line.push_back(c);
+    }
+    if (!line.empty()) {
+        split_tabs(line, &cols);
+        if (cols.size() >= 6) {
+            RemoteObject obj;
+            obj.zone = static_cast<sarc::core::u32>(std::strtoul(cols[1].c_str(), nullptr, 10));
+            obj.hash = cols[2];
+            obj.size = static_cast<sarc::core::u64>(std::strtoull(cols[3].c_str(), nullptr, 10));
+            obj.filename = cols[4];
+            obj.mime = cols[5];
+            out->push_back(std::move(obj));
+        }
+    }
+    return true;
+}
+
+static bool extract_json_string(const std::string& body, const std::string& key, std::string* out) {
+    if (!out) return false;
+    const std::string pat = "\"" + key + "\":";
+    size_t pos = body.find(pat);
+    if (pos == std::string::npos) return false;
+    pos += pat.size();
+    while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) ++pos;
+    if (pos >= body.size() || body[pos] != '"') return false;
+    ++pos;
+    std::string val;
+    while (pos < body.size()) {
+        char c = body[pos++];
+        if (c == '\\' && pos < body.size()) {
+            char esc = body[pos++];
+            switch (esc) {
+                case '"': val.push_back('"'); break;
+                case '\\': val.push_back('\\'); break;
+                case 'n': val.push_back('\n'); break;
+                case 'r': val.push_back('\r'); break;
+                case 't': val.push_back('\t'); break;
+                default: val.push_back(esc); break;
+            }
+            continue;
+        }
+        if (c == '"') break;
+        val.push_back(c);
+    }
+    *out = val;
+    return true;
+}
+
+static bool extract_json_int(const std::string& body, const std::string& key, long long* out) {
+    if (!out) return false;
+    const std::string pat = "\"" + key + "\":";
+    size_t pos = body.find(pat);
+    if (pos == std::string::npos) return false;
+    pos += pat.size();
+    while (pos < body.size() && std::isspace(static_cast<unsigned char>(body[pos]))) ++pos;
+    size_t end = pos;
+    while (end < body.size() && (std::isdigit(static_cast<unsigned char>(body[end])) || body[end] == '-')) ++end;
+    if (end == pos) return false;
+    *out = std::strtoll(body.substr(pos, end - pos).c_str(), nullptr, 10);
+    return true;
+}
+
+static std::string url_encode(const std::string& in) {
+    static const char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    for (unsigned char c : in) {
+        if ((c >= 'a' && c <= 'z') ||
+            (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[(c >> 4) & 0x0F]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
+static std::string json_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (char c : in) {
+        switch (c) {
+            case '\"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default: out += c; break;
+        }
+    }
+    return out;
+}
+
+#if defined(SARC_HAVE_LIBCURL)
+static bool ensure_curl_global() {
+    static bool inited = false;
+    if (!inited) {
+        if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) return false;
+        inited = true;
+    }
+    return true;
+}
+
+static bool remote_request(const CliConfig& cfg,
+                           const DeviceKeys& keys,
+                           const std::string& method,
+                           const std::string& path_query,
+                           const std::string& body,
+                           const std::vector<std::string>& extra_headers,
+                           HttpResponse* out) {
+    if (!ensure_curl_global()) return false;
+    std::vector<std::string> headers;
+    headers.reserve(4 + extra_headers.size());
+    if (!build_auth_headers(keys, method, path_query, body, &headers)) {
+        return false;
+    }
+    headers.insert(headers.end(), extra_headers.begin(), extra_headers.end());
+    const std::string url = join_url(cfg.remote_url, path_query);
+    return http_request(method, url, headers, body, out);
+}
+
+static bool remote_request_unauth(const std::string& url,
+                                  const std::string& method,
+                                  const std::string& body,
+                                  const std::vector<std::string>& extra_headers,
+                                  HttpResponse* out) {
+    if (!ensure_curl_global()) return false;
+    return http_request(method, url, extra_headers, body, out);
+}
+#endif
 
 static bool parse_object_key(const CliConfig& cfg, const char* key_str, sarc::core::ObjectKey* out) {
     if (!key_str || !out) return false;
@@ -672,10 +1157,227 @@ void handle_help() {
     printf("  zone [id]         Show or switch current zone\n");
     printf("  gc                Garbage collect deleted objects\n");
     printf("  verify <key>      Verify object integrity\n");
+    printf("  remote <cmd>      Remote auth/share commands (init, pair, approve, share, members, audit, off, status)\n");
     printf("  help              Show this help\n");
     printf("  q, quit, exit     Exit REPL\n");
     printf("\n");
     printf("Key format: zone:hash (e.g., 1:a3b5c7d9...)\n");
+}
+
+static void handle_remote(CliConfig& cfg, int argc, char** argv) {
+    if (argc < 1 || !argv[0]) {
+        print_error("remote: missing subcommand");
+        return;
+    }
+    const std::string sub = argv[0];
+    if (!remote_available()) {
+        print_error("remote: build without libsodium/libcurl support");
+        return;
+    }
+
+#if defined(SARC_HAVE_LIBCURL)
+    DeviceKeys keys;
+    const std::string sarc_home = get_sarc_home_dir();
+    ensure_dir_exists(sarc_home);
+
+    if (sub == "status") {
+        printf("remote_enabled=%s\n", cfg.remote_enabled ? "true" : "false");
+        printf("remote_url=%s\n", cfg.remote_url.c_str());
+        return;
+    }
+    if (sub == "off") {
+        cfg.remote_enabled = false;
+        save_remote_config(cfg);
+        printf("remote disabled\n");
+        return;
+    }
+
+    if (sub == "init" || sub == "pair") {
+        if (argc < 2 || !argv[1]) {
+            print_error("remote: expected url");
+            return;
+        }
+        const std::string url = argv[1];
+        const std::string label = (argc >= 3 && argv[2]) ? argv[2] : "device";
+
+        if (!ensure_device_keys(&keys)) {
+            print_error("remote: failed to load/create device keys");
+            return;
+        }
+
+        std::string pub_b64;
+#if defined(SARC_HAVE_LIBSODIUM)
+        base64_encode(keys.pub.data(), keys.pub.size(), &pub_b64);
+#endif
+        const std::string body = std::string("{\"pubkey\":\"") + pub_b64 + "\",\"label\":\"" + json_escape(label) + "\"}";
+        HttpResponse resp;
+        const std::string path = (sub == "init") ? "/auth/init" : "/auth/pair/request";
+        const std::string full_url = join_url(url, path);
+        std::vector<std::string> headers = {"Content-Type: application/json"};
+        if (!remote_request_unauth(full_url, "POST", body, headers, &resp)) {
+            print_error("remote: request failed");
+            return;
+        }
+        if (resp.status >= 300) {
+            fprintf(stderr, "remote: server error (%ld): %s\n", resp.status, resp.body.c_str());
+            return;
+        }
+
+        if (sub == "init") {
+            long long user_id = 0;
+            std::string fingerprint;
+            extract_json_int(resp.body, "user_id", &user_id);
+            extract_json_string(resp.body, "fingerprint", &fingerprint);
+            printf("initialized admin user_id=%lld fingerprint=%s\n", user_id, fingerprint.c_str());
+            cfg.remote_url = url;
+            cfg.remote_enabled = true;
+            save_remote_config(cfg);
+            return;
+        }
+
+        std::string code;
+        long long expires = 0;
+        extract_json_string(resp.body, "code", &code);
+        extract_json_int(resp.body, "expires_in", &expires);
+        printf("pairing code=%s (expires_in=%llds)\n", code.c_str(), expires);
+        cfg.remote_url = url;
+        cfg.remote_enabled = true;
+        save_remote_config(cfg);
+        return;
+    }
+
+    if (sub == "approve") {
+        if (argc < 2 || !argv[1]) {
+            print_error("remote: expected code");
+            return;
+        }
+        if (cfg.remote_url.empty()) {
+            print_error("remote: set remote url with 'remote init <url>' or 'remote pair <url>'");
+            return;
+        }
+        if (!load_device_keys(&keys)) {
+            print_error("remote: device keys not found (run 'remote init' or 'remote pair')");
+            return;
+        }
+        const std::string code = argv[1];
+        const std::string body = std::string("{\"code\":\"") + json_escape(code) + "\"}";
+        HttpResponse resp;
+        const std::string path = "/auth/pair/approve";
+        std::vector<std::string> extra = {"Content-Type: application/json"};
+        if (!remote_request(cfg, keys, "POST", path, body, extra, &resp)) {
+            print_error("remote: request failed");
+            return;
+        }
+        if (resp.status >= 300) {
+            fprintf(stderr, "remote: server error (%ld): %s\n", resp.status, resp.body.c_str());
+            return;
+        }
+        long long user_id = 0;
+        std::string fingerprint;
+        extract_json_int(resp.body, "user_id", &user_id);
+        extract_json_string(resp.body, "fingerprint", &fingerprint);
+        printf("approved user_id=%lld fingerprint=%s\n", user_id, fingerprint.c_str());
+        return;
+    }
+
+    if (sub == "share") {
+        if (argc < 2 || !argv[1]) {
+            print_error("remote: expected share on|off");
+            return;
+        }
+        if (cfg.remote_url.empty()) {
+            print_error("remote: missing remote url");
+            return;
+        }
+        if (!load_device_keys(&keys)) {
+            print_error("remote: device keys not found (run 'remote init' or 'remote pair')");
+            return;
+        }
+        bool shared = (std::strcmp(argv[1], "on") == 0 || std::strcmp(argv[1], "true") == 0);
+        sarc::core::u32 zone_val = cfg.zone.v;
+        if (argc >= 3 && argv[2]) {
+            parse_u32_strict(argv[2], &zone_val);
+        }
+        const std::string body = std::string("{\"shared\":") + (shared ? "true" : "false") + "}";
+        const std::string path = "/zones/" + std::to_string(zone_val) + "/share";
+        HttpResponse resp;
+        std::vector<std::string> extra = {"Content-Type: application/json"};
+        if (!remote_request(cfg, keys, "POST", path, body, extra, &resp)) {
+            print_error("remote: request failed");
+            return;
+        }
+        if (resp.status >= 300) {
+            fprintf(stderr, "remote: server error (%ld): %s\n", resp.status, resp.body.c_str());
+            return;
+        }
+        printf("zone %u shared=%s\n", zone_val, shared ? "true" : "false");
+        return;
+    }
+
+    if (sub == "members") {
+        if (cfg.remote_url.empty()) {
+            print_error("remote: missing remote url");
+            return;
+        }
+        if (!load_device_keys(&keys)) {
+            print_error("remote: device keys not found (run 'remote init' or 'remote pair')");
+            return;
+        }
+        sarc::core::u32 zone_val = cfg.zone.v;
+        if (argc >= 2 && argv[1]) {
+            parse_u32_strict(argv[1], &zone_val);
+        }
+        const std::string path = "/zones/" + std::to_string(zone_val) + "/members?format=plain";
+        HttpResponse resp;
+        if (!remote_request(cfg, keys, "GET", path, "", {}, &resp)) {
+            print_error("remote: request failed");
+            return;
+        }
+        if (resp.status >= 300) {
+            fprintf(stderr, "remote: server error (%ld): %s\n", resp.status, resp.body.c_str());
+            return;
+        }
+        printf("%s\n", resp.body.c_str());
+        return;
+    }
+
+    if (sub == "audit") {
+        if (cfg.remote_url.empty()) {
+            print_error("remote: missing remote url");
+            return;
+        }
+        if (!load_device_keys(&keys)) {
+            print_error("remote: device keys not found (run 'remote init' or 'remote pair')");
+            return;
+        }
+        sarc::core::u32 zone_val = cfg.zone.v;
+        if (argc >= 2 && argv[1]) {
+            parse_u32_strict(argv[1], &zone_val);
+        }
+        int limit = 100;
+        if (argc >= 3 && argv[2]) {
+            limit = std::atoi(argv[2]);
+        }
+        const std::string path = "/zones/" + std::to_string(zone_val) + "/audit?format=plain&limit=" + std::to_string(limit);
+        HttpResponse resp;
+        if (!remote_request(cfg, keys, "GET", path, "", {}, &resp)) {
+            print_error("remote: request failed");
+            return;
+        }
+        if (resp.status >= 300) {
+            fprintf(stderr, "remote: server error (%ld): %s\n", resp.status, resp.body.c_str());
+            return;
+        }
+        printf("%s\n", resp.body.c_str());
+        return;
+    }
+
+    print_error("remote: unknown subcommand");
+#else
+    (void)cfg;
+    (void)argc;
+    (void)argv;
+#endif
 }
 
 void handle_put(const CliConfig& cfg, int argc, char** argv) {
@@ -753,6 +1455,54 @@ void handle_put(const CliConfig& cfg, int argc, char** argv) {
         return;
     }
 
+    if (cfg.remote_enabled) {
+#if defined(SARC_HAVE_LIBCURL)
+        if (!remote_available() || cfg.remote_url.empty()) {
+            print_error("remote: not configured");
+            return;
+        }
+        DeviceKeys keys;
+        if (!load_device_keys(&keys)) {
+            print_error("remote: device keys not found (run 'remote init' or 'remote pair')");
+            return;
+        }
+        for (const auto& abs_path : files) {
+            const std::string abs_s = abs_path.string();
+            FileReadResult file;
+            sarc::core::Status s = read_file(abs_s.c_str(), &file);
+            if (!sarc::core::is_ok(s)) {
+                print_status_error("put", s);
+                continue;
+            }
+
+            const std::string filename = extract_filename(abs_s.c_str());
+            const std::string mime = guess_mime_type(filename.c_str());
+            const std::string path = "/objects?zone=" + std::to_string(cfg.zone.v) +
+                                     "&filename=" + url_encode(filename) +
+                                     "&mime_type=" + url_encode(mime);
+
+            HttpResponse resp;
+            std::vector<std::string> headers = {"Content-Type: application/octet-stream"};
+            std::string body(reinterpret_cast<const char*>(file.data), static_cast<size_t>(file.size));
+            bool ok = remote_request(cfg, keys, "PUT", path, body, headers, &resp);
+            free(file.data);
+            if (!ok) {
+                print_error("remote: put request failed");
+                continue;
+            }
+            if (resp.status >= 300) {
+                fprintf(stderr, "remote: put error (%ld): %s\n", resp.status, resp.body.c_str());
+                continue;
+            }
+            printf("put %s (remote ok)\n", abs_s.c_str());
+        }
+        return;
+#else
+        print_error("remote: build without libcurl support");
+        return;
+#endif
+    }
+
     for (const auto& abs_path : files) {
         const std::string abs_s = abs_path.string();
 
@@ -792,6 +1542,170 @@ void handle_put(const CliConfig& cfg, int argc, char** argv) {
         }
     }
 }
+
+#if defined(SARC_HAVE_LIBCURL)
+static bool remote_fetch_list(const CliConfig& cfg, const DeviceKeys& keys, std::vector<RemoteObject>* out) {
+    if (!out) return false;
+    const std::string path = "/zones/" + std::to_string(cfg.zone.v) + "/objects?limit=10000&format=plain";
+    HttpResponse resp;
+    if (!remote_request(cfg, keys, "GET", path, "", {}, &resp)) return false;
+    if (resp.status >= 300) return false;
+    return parse_remote_list_body(resp.body, out);
+}
+
+static void handle_get_remote(const CliConfig& cfg,
+                              const char* selector,
+                              const char* output_override,
+                              bool open_file,
+                              bool open_dir,
+                              bool open_origin_file,
+                              bool open_origin_dir) {
+    if (cfg.remote_url.empty()) {
+        print_error("remote: not configured");
+        return;
+    }
+    if (open_origin_file || open_origin_dir) {
+        print_error("remote: open-origin not supported");
+        return;
+    }
+    DeviceKeys keys;
+    if (!load_device_keys(&keys)) {
+        print_error("remote: device keys not found (run 'remote init' or 'remote pair')");
+        return;
+    }
+
+    sarc::core::ObjectKey key{};
+    bool key_ok = parse_object_key(cfg, selector, &key);
+    std::string filename_hint;
+
+    if (!key_ok) {
+        sarc::core::u32 rid = 0;
+        const bool rid_ok = parse_u32_strict(selector, &rid) && rid > 0;
+        std::vector<RemoteObject> objs;
+        if (!remote_fetch_list(cfg, keys, &objs)) {
+            print_error("remote: list failed");
+            return;
+        }
+        if (rid_ok) {
+            if (rid > objs.size()) {
+                print_error("get: RID out of range");
+                return;
+            }
+            const auto& obj = objs[rid - 1];
+            sarc::core::Hash256 h{};
+            if (!parse_hash256_hex(obj.hash.c_str(), &h)) {
+                print_error("get: invalid hash");
+                return;
+            }
+            key = sarc::core::ObjectKey{sarc::core::ZoneId{obj.zone}, h};
+            filename_hint = obj.filename;
+            key_ok = true;
+        } else {
+            std::vector<size_t> matches;
+            matches.reserve(8);
+            for (size_t i = 0; i < objs.size(); ++i) {
+                if (objs[i].filename == selector) matches.push_back(i);
+            }
+            if (matches.empty()) {
+                for (size_t i = 0; i < objs.size(); ++i) {
+                    if (!objs[i].filename.empty() &&
+                        objs[i].filename.find(selector) != std::string::npos) {
+                        matches.push_back(i);
+                    }
+                }
+            }
+            if (matches.empty()) {
+                print_error("get: no object matches selector (try list)");
+                return;
+            }
+            if (matches.size() > 1) {
+                fprintf(stderr, "error: get: selector matches multiple objects; use RID or key\n");
+                return;
+            }
+            const auto& obj = objs[matches[0]];
+            sarc::core::Hash256 h{};
+            if (!parse_hash256_hex(obj.hash.c_str(), &h)) {
+                print_error("get: invalid hash");
+                return;
+            }
+            key = sarc::core::ObjectKey{sarc::core::ZoneId{obj.zone}, h};
+            filename_hint = obj.filename;
+            key_ok = true;
+        }
+    }
+
+    if (!key_ok) {
+        print_error("get: invalid selector");
+        return;
+    }
+
+    char hash_hex[65];
+    hash_to_hex(key.content, hash_hex, sizeof(hash_hex));
+    const std::string hash_str = std::string(hash_hex);
+    std::string suggested = !filename_hint.empty() ? filename_hint : hash_str;
+
+    namespace fs = std::filesystem;
+    fs::path out_path = fs::path(suggested);
+
+    if (!output_override && (open_file || open_dir)) {
+        std::error_code ec;
+        purge_views_folder(cfg.views_root);
+        const fs::path zone_dir = fs::path(cfg.views_root) / std::to_string(key.zone.v);
+        (void)fs::create_directories(zone_dir, ec);
+        std::string view_name = hash_str;
+        if (!filename_hint.empty()) {
+            const std::string safe = fs::path(filename_hint).filename().string();
+            const std::string truncated = truncate_filename_preserving_ext(safe, 200);
+            view_name += "_";
+            view_name += truncated;
+        }
+        out_path = zone_dir / fs::path(view_name).filename();
+    }
+
+    if (output_override && output_override[0] != '\0') {
+        fs::path o = fs::path(output_override);
+        std::error_code ec;
+        const bool o_is_dir = fs::exists(o, ec) && fs::is_directory(o, ec);
+        const bool ends_with_slash = (std::strlen(output_override) > 0 &&
+                                      (output_override[std::strlen(output_override) - 1] == '/' ||
+                                       output_override[std::strlen(output_override) - 1] == '\\'));
+        if (o_is_dir || ends_with_slash) {
+            out_path = o / fs::path(suggested).filename();
+        } else {
+            out_path = o;
+        }
+    }
+
+    const std::string path = "/objects/" + std::to_string(key.zone.v) + "/" + hash_str;
+    std::vector<std::string> headers;
+    if (!build_auth_headers(keys, "GET", path, "", &headers)) {
+        print_error("remote: failed to sign request");
+        return;
+    }
+
+    long status = 0;
+    const std::string url = join_url(cfg.remote_url, path);
+    if (!http_download("GET", url, headers, out_path.string(), &status)) {
+        print_error("remote: download failed");
+        return;
+    }
+    if (status >= 300) {
+        fprintf(stderr, "remote: download error (%ld)\n", status);
+        std::error_code ec;
+        std::filesystem::remove(out_path, ec);
+        return;
+    }
+
+    printf("OK: wrote %s\n", out_path.string().c_str());
+    if (open_file) {
+        open_with_default_app(out_path);
+    }
+    if (open_dir) {
+        const fs::path dir = out_path.has_parent_path() ? out_path.parent_path() : fs::path(".");
+        open_with_default_app(dir);
+    }
+}
+#endif
 
 void handle_get(const CliConfig& cfg, int argc, char** argv) {
     if (argc < 1) {
@@ -839,6 +1753,16 @@ void handle_get(const CliConfig& cfg, int argc, char** argv) {
         }
         fprintf(stderr, "error: get: unknown option %s\n", a);
         return;
+    }
+
+    if (cfg.remote_enabled) {
+#if defined(SARC_HAVE_LIBCURL)
+        handle_get_remote(cfg, selector, output_override, open_file, open_dir, open_origin_file, open_origin_dir);
+        return;
+#else
+        print_error("remote: build without libcurl support");
+        return;
+#endif
     }
 
     sarc::core::ObjectKey key{};
@@ -1038,6 +1962,65 @@ void handle_list(const CliConfig& cfg, int argc, char** argv) {
         return;
     }
 
+    if (cfg.remote_enabled) {
+#if defined(SARC_HAVE_LIBCURL)
+        if (!remote_available() || cfg.remote_url.empty()) {
+            print_error("remote: not configured");
+            return;
+        }
+        DeviceKeys keys;
+        if (!load_device_keys(&keys)) {
+            print_error("remote: device keys not found (run 'remote init' or 'remote pair')");
+            return;
+        }
+        const std::string path = "/zones/" + std::to_string(cfg.zone.v) + "/objects?limit=1000&format=plain";
+        HttpResponse resp;
+        if (!remote_request(cfg, keys, "GET", path, "", {}, &resp)) {
+            print_error("remote: request failed");
+            return;
+        }
+        if (resp.status >= 300) {
+            fprintf(stderr, "remote: server error (%ld): %s\n", resp.status, resp.body.c_str());
+            return;
+        }
+        std::vector<RemoteObject> items;
+        parse_remote_list_body(resp.body, &items);
+        if (items.empty()) {
+            printf("No objects found in zone %u\n", cfg.zone.v);
+            return;
+        }
+        printf("Zone %u: %zu objects\n", cfg.zone.v, items.size());
+        if (all) {
+            printf("%-6s  %-8s  %-20s  %-12s  %s\n", "RID", "Zone", "Filename", "Size", "Key");
+        } else {
+            printf("%-6s  %-8s  %s\n", "RID", "Zone", "Filename");
+        }
+        printf("%s\n",
+               "--------------------------------------------------------------------------------");
+        for (size_t i = 0; i < items.size(); ++i) {
+            const char* name = items[i].filename.empty() ? "<blob>" : items[i].filename.c_str();
+            if (all) {
+                printf("%-6zu  %-8u  %-20s  %-12llu  %u:%s\n",
+                       i + 1,
+                       items[i].zone,
+                       name,
+                       static_cast<unsigned long long>(items[i].size),
+                       items[i].zone,
+                       items[i].hash.c_str());
+            } else {
+                printf("%-6zu  %-8u  %s\n",
+                       i + 1,
+                       items[i].zone,
+                       name);
+            }
+        }
+        return;
+#else
+        print_error("remote: build without libcurl support");
+        return;
+#endif
+    }
+
     // Query all objects in zone
     sarc::storage::ObjectQueryFilter filter{
         .filename_pattern = nullptr,
@@ -1118,6 +2101,10 @@ void handle_search(const CliConfig& cfg, const char* query) {
         print_error("search: missing query");
         return;
     }
+    if (cfg.remote_enabled) {
+        print_error("search: remote search not supported");
+        return;
+    }
     std::string q = query;
     while (!q.empty() && (q.back() == '\n' || q.back() == '\r')) q.pop_back();
     if (q.empty()) {
@@ -1182,6 +2169,37 @@ void handle_gc(const CliConfig& cfg, int argc, char** argv) {
     (void)argc;
     (void)argv;
 
+    if (cfg.remote_enabled) {
+#if defined(SARC_HAVE_LIBCURL)
+        if (!remote_available() || cfg.remote_url.empty()) {
+            print_error("remote: not configured");
+            return;
+        }
+        DeviceKeys keys;
+        if (!load_device_keys(&keys)) {
+            print_error("remote: device keys not found (run 'remote init' or 'remote pair')");
+            return;
+        }
+        const std::string path = "/gc/" + std::to_string(cfg.zone.v);
+        HttpResponse resp;
+        if (!remote_request(cfg, keys, "POST", path, "", {}, &resp)) {
+            print_error("remote: request failed");
+            return;
+        }
+        if (resp.status >= 300) {
+            fprintf(stderr, "remote: gc error (%ld): %s\n", resp.status, resp.body.c_str());
+            return;
+        }
+        long long deleted = 0;
+        extract_json_int(resp.body, "deleted_count", &deleted);
+        printf("Garbage collected %lld objects from zone %u\n", deleted, cfg.zone.v);
+        return;
+#else
+        print_error("remote: build without libcurl support");
+        return;
+#endif
+    }
+
     sarc::core::u64 deleted = 0;
     sarc::core::Status s = sarc::storage::object_gc(cfg.zone, &deleted);
 
@@ -1200,6 +2218,10 @@ void handle_verify(const CliConfig& cfg, int argc, char** argv) {
 
     if (argc < 1) {
         print_error("verify: missing object key");
+        return;
+    }
+    if (cfg.remote_enabled) {
+        print_error("verify: remote verify not supported");
         return;
     }
 
@@ -1283,6 +2305,8 @@ int main(int argc, char** argv) {
         cfg.views_root = "/tmp/sarc/views";
     }
 
+    load_remote_config(cfg);
+
     std::error_code ec;
     std::filesystem::create_directories(cfg.data_root, ec);
     std::filesystem::create_directories(std::filesystem::path(cfg.db_path).parent_path(), ec);
@@ -1324,6 +2348,10 @@ int main(int argc, char** argv) {
     printf("data_root=%s\n", cfg.data_root.c_str());
     printf("db_path=%s\n", cfg.db_path.c_str());
     printf("views_root=%s\n", cfg.views_root.c_str());
+    if (cfg.remote_enabled) {
+        printf("remote_enabled=true\n");
+        printf("remote_url=%s\n", cfg.remote_url.c_str());
+    }
     printf("Type 'help' for commands, 'q' to quit\n\n");
 
     // REPL loop
@@ -1391,6 +2419,12 @@ int main(int argc, char** argv) {
             // zone / z: local (not part of parse_command).
             if (std::strcmp(cmd0, "zone") == 0 || std::strcmp(cmd0, "z") == 0) {
                 handle_zone(cfg, cmd_argc - 1, cmd_argv + 1);
+                free_argv(cmd_argv, cmd_argc);
+                continue;
+            }
+
+            if (std::strcmp(cmd0, "remote") == 0) {
+                handle_remote(cfg, cmd_argc - 1, cmd_argv + 1);
                 free_argv(cmd_argv, cmd_argc);
                 continue;
             }

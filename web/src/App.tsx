@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { HardDrive, RefreshCw, Trash2 } from 'lucide-react';
+import { HardDrive, RefreshCw, Trash2, Radio } from 'lucide-react';
 import { useAppStore } from './state/store';
 import { useUIStore } from './state/ui-store';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -10,6 +10,7 @@ import { SecurityModal } from './components/SecurityModal';
 import { PreviewModal } from './components/PreviewModal';
 import { CommandPalette } from './components/CommandPalette';
 import { VimCommandLine } from './components/VimCommandLine';
+import { RemoteModal } from './components/RemoteModal';
 import { api } from './api';
 
 type VimMode = 'normal' | 'search' | 'find';
@@ -37,6 +38,7 @@ function App() {
 
   // Vim mode state
   const [vimMode, setVimMode] = useState<VimMode>('normal');
+  const [remoteOpen, setRemoteOpen] = useState(false);
 
   // WebSocket connection
   useWebSocket();
@@ -206,16 +208,26 @@ function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 border-2 border-white p-2">
-            <span className="text-sm">ZONE:</span>
-            <input
-              type="number"
-              min="1"
-              max="65535"
-              value={currentZone}
-              onChange={(e) => setCurrentZone(parseInt(e.target.value) || 1)}
-              className="w-16 p-1 text-right"
-            />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setRemoteOpen(true)}
+              className="flex items-center gap-2 border-2 border-white px-3 py-2 hover:bg-gray-800"
+              title="Remote access"
+            >
+              <Radio className="w-4 h-4" />
+              REMOTE
+            </button>
+            <div className="flex items-center gap-2 border-2 border-white p-2">
+              <span className="text-sm">ZONE:</span>
+              <input
+                type="number"
+                min="1"
+                max="65535"
+                value={currentZone}
+                onChange={(e) => setCurrentZone(parseInt(e.target.value) || 1)}
+                className="w-16 p-1 text-right"
+              />
+            </div>
           </div>
         </div>
       </header>
@@ -322,6 +334,9 @@ function App() {
         onEscape={handleVimEscape}
         onExecute={handleVimCommand}
       />
+
+      {/* Remote Modal */}
+      <RemoteModal open={remoteOpen} onClose={() => setRemoteOpen(false)} zone={currentZone} />
 
       {/* Status Bar at bottom */}
       {vimMode === 'normal' && (

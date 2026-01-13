@@ -42,3 +42,21 @@ export interface ZoneStats {
   total_size: number;
   unique_objects: number;
 }
+
+export interface ZoneMember {
+  user_id: number;
+  label?: string;
+  is_admin?: boolean;
+  fingerprint?: string;
+}
+
+export interface ZoneAuditEntry {
+  ts: number;
+  user_id: number;
+  zone: number;
+  action: string;
+  status: string;
+  meta?: Record<string, unknown>;
+  ip?: string;
+  ua?: string;
+}

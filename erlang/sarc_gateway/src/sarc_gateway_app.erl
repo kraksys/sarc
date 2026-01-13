@@ -14,6 +14,9 @@ start(_StartType, _StartArgs) ->
     %% Setup environment variables for NIF and Port
     ok = setup_env(),
 
+    %% Initialize auth subsystem
+    ok = sarc_auth:init(),
+
     %% Load NIF library
     ok = ensure_nif_loaded(),
 
@@ -45,6 +48,7 @@ start(_StartType, _StartArgs) ->
 stop(_State) ->
     %% Stop Cowboy listener
     ok = cowboy:stop_listener(sarc_http_listener),
+    ok = sarc_auth:close(),
     io:format("SARC Gateway stopped~n"),
     ok.
 

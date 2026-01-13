@@ -7,6 +7,7 @@ add_requires("blake3")
 add_requires("sqlite3")
 add_requires("libsodium", { system = true, optional = true })
 add_requires("openssl", { system = true, optional = true })
+add_requires("libcurl", { system = true, optional = true })
 
 target("sarc")
 set_kind("static")
@@ -28,6 +29,10 @@ if has_package("sqlite3") then
     add_packages("sqlite3", { public = true })
     add_defines("SARC_HAVE_SQLITE3=1", { public = true })
 end
+if has_package("libcurl") then
+    add_packages("libcurl")
+    add_defines("SARC_HAVE_LIBCURL=1", { public = true })
+end
 add_files(
     "src/core/**.cpp",
     "src/security/**.cpp",
@@ -45,6 +50,7 @@ add_includedirs("include")
 add_packages("blake3")
 if has_package("libsodium") then add_packages("libsodium") end
 if has_package("openssl") then add_packages("openssl") end
+if has_package("libcurl") then add_packages("libcurl") end
 add_files("src/cli/**.cpp")
 
 target("sarc_tests")

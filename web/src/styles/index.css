@@ -39,17 +39,6 @@ body::before {
   z-index: 9999;
 }
 
-/* CRT flicker animation */
-@keyframes flicker {
-  0% { opacity: 0.97; }
-  50% { opacity: 1; }
-  100% { opacity: 0.97; }
-}
-
-body {
-  animation: flicker 0.15s infinite;
-}
-
 /* Typography */
 * {
   font-family: 'Courier New', 'Courier', monospace !important;

@@ -19,16 +19,25 @@ content_types_accepted(Req, State) ->
 gc_from_json(Req, State = #{zone := ZoneBin}) ->
     case sarc_handler_utils:parse_zone(ZoneBin) of
         {ok, Zone} ->
-            case sarc_port:object_gc(Zone) of
-                {ok, DeletedCount} ->
-                    Response = #{deleted_count => DeletedCount},
-                    Json = jsx:encode(Response),
-                    Req1 = cowboy_req:set_resp_body(Json, Req),
-                    Req2 = cowboy_req:set_resp_header(<<"content-type">>,
-                                                       <<"application/json">>, Req1),
-                    {true, Req2, State};
-                {error, Reason} ->
-                    {Code, Msg} = sarc_handler_utils:map_error(Reason),
+            BodyHash = sarc_auth:sha256_hex(<<>>),
+            Path = sarc_auth:canonical_path(Req),
+            case sarc_auth:require_auth(Req, <<"POST">>, Path, BodyHash, Zone, false) of
+                {ok, User} ->
+                    case sarc_port:object_gc(Zone) of
+                        {ok, DeletedCount} ->
+                            sarc_auth:log_action(User, Zone, <<"gc">>, Req, ok, #{deleted_count => DeletedCount}),
+                            Response = #{deleted_count => DeletedCount},
+                            Json = jsx:encode(Response),
+                            Req1 = cowboy_req:set_resp_body(Json, Req),
+                            Req2 = cowboy_req:set_resp_header(<<"content-type">>,
+                                                               <<"application/json">>, Req1),
+                            {true, Req2, State};
+                        {error, Reason} ->
+                            sarc_auth:log_action(User, Zone, <<"gc">>, Req, error, #{reason => Reason}),
+                            {Code, Msg} = sarc_handler_utils:map_error(Reason),
+                            {false, sarc_handler_utils:error_response(Req, Code, Msg), State}
+                    end;
+                {error, {Code, Msg}} ->
                     {false, sarc_handler_utils:error_response(Req, Code, Msg), State}
             end;
         {error, _} ->
